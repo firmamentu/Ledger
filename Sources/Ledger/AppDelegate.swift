@@ -24,9 +24,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let fd = open(AppPaths.lockURL.path, O_CREAT | O_RDWR, 0o644)
-        if fd < 0 || flock(fd, LOCK_EX | LOCK_NB) != 0 {
-            if fd >= 0 { close(fd) }
+        let fd = open(AppPaths.lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o644)
+        if fd < 0 {
+            // open 失败（磁盘满/权限）≠ 已有实例：走 didFinish 的 fatal 弹窗
+            let code = errno
+            startupError = NSError(
+                domain: NSPOSIXErrorDomain, code: Int(code),
+                userInfo: [NSLocalizedDescriptionKey: "无法创建单实例锁文件（errno \(code)）"]
+            )
+            return
+        }
+        if flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            close(fd)
             logger.notice("Ledger 已在运行；本实例退出。")
             NSApp.terminate(nil)
             return
