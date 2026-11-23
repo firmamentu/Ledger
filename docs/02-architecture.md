@@ -20,8 +20,9 @@ Ledger 是「安装时记账、卸载时对账」的本地知情工具：原生 
 | `AppPaths` | bundleID 单一真源（读 Info.plist）、数据目录/锁文件路径 | 已落地（M1） |
 | `Database` | SQLite 连接（WAL、`user_version=1`、NSLock 串行化）、§8 七张表、迁移 | 已落地（M1） |
 | `AppDelegate` | 单实例锁、菜单栏、窗口生命周期 | 已落地（M1） |
-| `IndexStore`（M2） | 扫描根内存索引 `Map<path, {size, mtime, inode}>`，60s 落盘 | 规划 |
-| `FileMonitor`（M2） | FSEvents（`kFSEventStreamCreateFlagFileEvents`，latency 0.5s）；额外监听 `~/.Trash`（仅卸载判定，非扫描根） | 规划 |
+| `IndexStore` | 扫描根内存索引 `Map<path, {size, mtime, inode}>`，dirty 增量 60s 落盘 | 已落地（M2） |
+| `ScanService` | 子进程 `/usr/bin/find` 扫描（15s 无输出超时保护）+ 定时落盘 + 唤醒对账 | 已落地（M2） |
+| `FileMonitor` | FSEvents（`kFSEventStreamCreateFlagFileEvents`，latency 0.5s）；额外监听 `~/.Trash`（仅卸载判定，非扫描根）；`last_fsevent_id` 持久化 | 已落地（M2） |
 | `InstallContext`（M3） | 新装判定 + §5.3 记账时序（30s 稳定、结构/签名校验、manifest 落库） | 规划 |
 | `Reconciler`（M4） | 启动/唤醒对账（§5.4 目录级事件重放）、卸载判定（§5.5） | 规划 |
 | `VerdictService`（M5） | verdict / requires_admin / evidence 判定（§10）+ `knowledge.json` 解释匹配 | 规划 |
@@ -32,8 +33,14 @@ Ledger 是「安装时记账、卸载时对账」的本地知情工具：原生 
 ## 4. 线程模型
 
 - 主线程：UI + AppKit 生命周期 + `Database` 调用（NSLock 保护）。
-- 后台串行队列（M2 起）：扫描、FSEvents 回调、对账、manifest 落库。
+- `com.ledger.app.scan` 串行队列：全量扫描、目录重扫、60s 落盘；扫描本体跑在子进程 `/usr/bin/find`（本机存在 readdir 永久阻塞的目录，子进程 + 超时才可杀死）。
+- `com.ledger.app.events` 串行队列：FSEvents 回调（FileEvents）→ 文件级 upsert / 目录级交扫描队列重扫。
 - `Database` 是进程内唯一 SQLite 连接；单实例锁保证全系统只有一个 Ledger 进程。
+
+## 4.1 扫描防御（环境实测）
+
+- `com.apple.*` 目录整树跳过（系统目录非 App 残留；`com.apple.CloudPhotosConfiguration` readdir 永久阻塞）。
+- 多个 Group Containers 目录 readdir 永久阻塞（微信/钉钉/OneDrive 等）：find 子进程 15s 无输出即终止，该根记盲区「不完整」。
 
 ## 5. 数据流（安装 → 卸载 → 清理）
 
@@ -51,8 +58,8 @@ FSEvents 事件（/Applications, ~/Applications）
 ## 6. 持久化
 
 - SQLite 单文件 `~/Library/Application Support/com.ledger.app/ledger.sqlite`，WAL、`synchronous=NORMAL`、busy_timeout 5s。
-- 内存索引定期落盘（M2，60s）；`meta.last_fsevent_id` 用于重启对账。
-- 崩溃安全：flock 由内核在进程退出时释放；SQLite 事务保证迁移原子性。
+- 内存索引落盘到 `index_entries` 表（§8 未覆盖的内部表，见 devlog 推断）；`meta.last_fsevent_id` 用于重启对账；`meta.baseline_blind_spots` 存基线盲区 JSON。
+- 崩溃安全：flock 由内核在进程退出时释放；SQLite 事务保证迁移与批量写原子性。
 
 ## 7. 构建链
 

@@ -1,6 +1,9 @@
 import Foundation
 import SQLite3
 
+// C 宏 SQLITE_TRANSIENT 不导入 Swift；等价写法（-1）让 SQLite 自行拷贝绑定值
+private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
 enum DatabaseError: LocalizedError {
     case open(String)
     case execution(String)
@@ -70,12 +73,139 @@ final class Database {
         return try scalarUnlocked(sql)
     }
 
+    // MARK: - meta 键值
+
+    func metaGet(_ key: String) throws -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        var statement: OpaquePointer?
+        let sql = "SELECT value FROM meta WHERE key = ?;"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, key, -1, sqliteTransient)
+
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return String(cString: sqlite3_column_text(statement, 0))
+    }
+
+    func metaSet(_ key: String, _ value: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        var statement: OpaquePointer?
+        let sql = "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?);"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, key, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 2, value, -1, sqliteTransient)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+        }
+    }
+
+    // MARK: - 索引持久化
+
+    func loadIndexEntries() throws -> [(path: String, size: Int64, mtime: Double, inode: Int64)] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        var statement: OpaquePointer?
+        let sql = "SELECT path, size_bytes, mtime, inode FROM index_entries;"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+        }
+        defer { sqlite3_finalize(statement) }
+
+        var rows: [(path: String, size: Int64, mtime: Double, inode: Int64)] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            rows.append((
+                path: String(cString: sqlite3_column_text(statement, 0)),
+                size: sqlite3_column_int64(statement, 1),
+                mtime: sqlite3_column_double(statement, 2),
+                inode: sqlite3_column_int64(statement, 3)
+            ))
+        }
+        return rows
+    }
+
+    /// 单事务批量应用索引变化：upsert 与 delete 分别成批。
+    func applyIndexChanges(
+        upserts: [(path: String, size: Int64, mtime: Double, inode: Int64)],
+        deletes: [String]
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        try executeUnlocked("BEGIN IMMEDIATE;")
+        do {
+            if !upserts.isEmpty {
+                var statement: OpaquePointer?
+                let sql = "INSERT OR REPLACE INTO index_entries(path, size_bytes, mtime, inode) VALUES(?, ?, ?, ?);"
+                guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                    throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+                }
+                defer { sqlite3_finalize(statement) }
+                for row in upserts {
+                    sqlite3_bind_text(statement, 1, row.path, -1, sqliteTransient)
+                    sqlite3_bind_int64(statement, 2, row.size)
+                    sqlite3_bind_double(statement, 3, row.mtime)
+                    sqlite3_bind_int64(statement, 4, row.inode)
+                    guard sqlite3_step(statement) == SQLITE_DONE else {
+                        throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+                    }
+                    sqlite3_reset(statement)
+                    sqlite3_clear_bindings(statement)
+                }
+            }
+
+            if !deletes.isEmpty {
+                var statement: OpaquePointer?
+                let sql = "DELETE FROM index_entries WHERE path = ?;"
+                guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                    throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+                }
+                defer { sqlite3_finalize(statement) }
+                for path in deletes {
+                    sqlite3_bind_text(statement, 1, path, -1, sqliteTransient)
+                    guard sqlite3_step(statement) == SQLITE_DONE else {
+                        throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+                    }
+                    sqlite3_reset(statement)
+                    sqlite3_clear_bindings(statement)
+                }
+            }
+
+            try executeUnlocked("COMMIT;")
+        } catch {
+            try? executeUnlocked("ROLLBACK;")
+            throw error
+        }
+    }
+
     private func migrate() throws {
         let version = try scalarUnlocked("PRAGMA user_version;")
-        guard version == 0 else {
-            guard version == 1 else { throw DatabaseError.unsupportedSchema(version) }
+        if version == 1 {
+            // M2 起新增索引持久化表（规格 §8 未覆盖的内部表，见 devlog）：幂等补建，兼容既有库
+            try execute("""
+            CREATE TABLE IF NOT EXISTS index_entries (
+                path TEXT PRIMARY KEY,
+                size_bytes INTEGER,
+                mtime REAL,
+                inode INTEGER
+            );
+            """)
             return
         }
+        guard version == 0 else { throw DatabaseError.unsupportedSchema(version) }
 
         try execute("BEGIN IMMEDIATE;")
         do {
@@ -138,6 +268,12 @@ final class Database {
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 value TEXT
+            );
+            CREATE TABLE IF NOT EXISTS index_entries (
+                path TEXT PRIMARY KEY,
+                size_bytes INTEGER,
+                mtime REAL,
+                inode INTEGER
             );
             """)
             try execute("PRAGMA user_version = 1;")

@@ -12,6 +12,11 @@ let package = Package(
             name: "Ledger",
             path: "Sources/Ledger",
             linkerSettings: [.linkedLibrary("sqlite3")]
+        ),
+        .testTarget(
+            name: "LedgerTests",
+            dependencies: ["Ledger"],
+            path: "Tests/LedgerTests"
         )
     ]
 )

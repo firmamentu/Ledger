@@ -1,9 +1,11 @@
 import SwiftUI
 
 struct RootView: View {
+    @ObservedObject var model: AppModel
+
     var body: some View {
         TabView {
-            OverviewView()
+            OverviewView(model: model)
                 .tabItem { Label("概览", systemImage: "square.grid.2x2") }
 
             PlaceholderTab(
@@ -24,20 +26,16 @@ struct RootView: View {
             )
             .tabItem { Label("周报", systemImage: "chart.bar.xaxis") }
 
-            PlaceholderTab(
-                title: "设置",
-                subtitle: "Ledger 只在本机工作，不发送任何数据。",
-                systemImage: "gearshape",
-                emptyTitle: "设置项正在准备中",
-                emptyMessage: "扫描范围、权限、保留策略与暂停记录将在后续阶段接入。"
-            )
-            .tabItem { Label("设置", systemImage: "gearshape") }
+            SettingsView(model: model)
+                .tabItem { Label("设置", systemImage: "gearshape") }
         }
         .frame(minWidth: 780, minHeight: 520)
     }
 }
 
 private struct OverviewView: View {
+    @ObservedObject var model: AppModel
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
@@ -52,6 +50,8 @@ private struct OverviewView: View {
                     MetricCard(title: "今日新增", value: "0 B", systemImage: "arrow.down.circle")
                 }
 
+                BaselineCard(model: model)
+
                 VStack(alignment: .leading, spacing: 12) {
                     Text("App 足迹")
                         .font(.headline)
@@ -60,6 +60,125 @@ private struct OverviewView: View {
                         title: "还没有记账记录",
                         message: "新安装的 App 稳定后，会在这里留下完整足迹。"
                     )
+                }
+            }
+            .padding(28)
+        }
+    }
+}
+
+/// M2 基线状态卡：扫描进度、索引规模、事件与盲区。
+private struct BaselineCard: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: stateIcon)
+                    .foregroundStyle(.secondary)
+                Text("基线状态")
+                    .font(.headline)
+                Spacer()
+                Text(stateText)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+
+            HStack(spacing: 16) {
+                statusRow("索引条目", "\(model.indexCount)")
+                statusRow("已处理事件", "\(model.eventsProcessed)")
+                statusRow("盲区", "\(model.blindSpots.count)")
+                statusRow("上次落盘", model.lastFlushAt.map(Self.formatter.string) ?? "—")
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.5))
+        }
+    }
+
+    private var stateIcon: String {
+        switch model.scanState {
+        case .idle: return "hourglass"
+        case .scanning: return "arrow.triangle.2.circlepath"
+        case .ready: return "checkmark.circle"
+        }
+    }
+
+    private var stateText: String {
+        switch model.scanState {
+        case .idle: return "等待扫描"
+        case .scanning: return "扫描中：已扫 \(model.scannedCount) 项"
+        case .ready: return "就绪"
+        }
+    }
+
+    private func statusRow(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(.callout.weight(.semibold))
+                .monospacedDigit()
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private static let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+}
+
+/// M2 版设置页：真实展示扫描状态与盲区；勾选/保留策略/暂停等 M7 接入。
+private struct SettingsView: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 26) {
+                PageHeader(
+                    title: "设置",
+                    subtitle: "Ledger 只在本机工作，不发送任何数据。"
+                )
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("扫描范围")
+                        .font(.headline)
+                    Text("17 个扫描根：~/Library 与 /Library 下的常见应用数据目录。扫描只读取元数据（大小、修改时间、inode），不读文件内容。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("盲区（未观测目录）")
+                        .font(.headline)
+                    if model.blindSpots.isEmpty {
+                        Text("没有盲区：所有扫描根均可读。")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("以下目录无法读取，账本在这些范围内不完整：")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        ForEach(model.blindSpots, id: \.self) { spot in
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "eye.slash")
+                                    .foregroundStyle(.orange)
+                                Text(spot)
+                                    .font(.callout)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                        Text("授权「完全磁盘访问权限」可补全盲区（系统设置 → 隐私与安全性 → 完全磁盘访问权限）。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             .padding(28)

@@ -11,6 +11,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var database: Database?
     private var lockFD: Int32?
     private var startupError: Error?
+    private var model = AppModel()
+    private var scanService: ScanService?
+    private var fileMonitor: FileMonitor?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // 单实例：持有排他锁直至进程退出；内核在退出时自动释放，崩溃不会留死锁。
@@ -61,7 +64,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        startServices()
         installStatusItem()
+    }
+
+    /// 组装扫描/监听服务并启动（§5.4 重启对账 + 唤醒对账 + 60s 落盘）。
+    private func startServices() {
+        guard let database else { return }
+        let store = IndexStore(database: database)
+        let scanner = ScanService(database: database, index: store, model: model)
+        scanService = scanner
+        let monitor = FileMonitor(database: database, scanService: scanner, model: model)
+        fileMonitor = monitor
+
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.scanService?.wakeReconcile()
+        }
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            do {
+                try store.load()
+            } catch {
+                self.logger.error("索引加载失败，将全量重扫：\(error.localizedDescription, privacy: .public)")
+            }
+
+            if let data = try? database.metaGet("baseline_blind_spots"),
+               let spots = try? JSONDecoder().decode([String].self, from: data.data(using: .utf8) ?? Data()) {
+                model.publish { $0.blindSpots = spots }
+            }
+
+            let lastID = (try? database.metaGet("last_fsevent_id")).flatMap { UInt64($0) }
+            let sinceNow = FSEventStreamEventId(kFSEventStreamEventIdSinceNow)
+            let needsFullScan = store.isEmpty || lastID == nil || lastID == sinceNow
+            let since: FSEventStreamEventId = needsFullScan ? sinceNow : lastID!
+
+            monitor.start(since: since)
+            scanner.startPeriodicFlush()
+
+            if needsFullScan {
+                self.logger.notice("无有效事件历史或索引为空：启动全量基线扫描")
+                scanner.fullScan()
+            } else {
+                self.logger.notice("索引已加载 \(store.count) 条，从事件 id=\(lastID!) 重放")
+                model.publish {
+                    $0.scanState = .ready
+                    $0.indexCount = store.count
+                }
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -127,7 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func makeMainWindow() -> NSWindow {
-        let window = NSWindow(contentViewController: NSHostingController(rootView: RootView()))
+        let window = NSWindow(contentViewController: NSHostingController(rootView: RootView(model: model)))
         window.title = "Ledger"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.setContentSize(NSSize(width: 940, height: 620))
