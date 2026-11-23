@@ -34,9 +34,11 @@ enum ScanRoots {
         home.appendingPathComponent(".Trash", isDirectory: true)
     }
 
-    /// FSEvents 监听路径 = 17 根 + ~/.Trash（~/.Trash 仅用于卸载判定，不入索引）。
+    /// FSEvents 监听路径 = 17 根 + ~/.Trash + /Applications + ~/Applications。
+    /// ~/.Trash 仅用于卸载判定；两个 Applications 目录用于安装检测（§5.2/§5.5），
+    /// 均不是扫描根、不入索引。不存在的路径 FSEvents 静默不监控。
     static var watchPaths: [URL] {
-        roots + [trashURL]
+        roots + [trashURL, URL(fileURLWithPath: "/Applications"), home.appendingPathComponent("Applications", isDirectory: true)]
     }
 
     /// 判断路径是否在 ~/.Trash 下（M4 卸载判定用；M2 只跳过、不处理）。

@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var model = AppModel()
     private var scanService: ScanService?
     private var fileMonitor: FileMonitor?
+    private var installService: InstallService?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // 单实例：持有排他锁直至进程退出；内核在退出时自动释放，崩溃不会留死锁。
@@ -76,6 +77,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scanService = scanner
         let monitor = FileMonitor(database: database, scanService: scanner, model: model)
         fileMonitor = monitor
+        let installer = InstallService(database: database, index: store, model: model)
+        installService = installer
+        scanner.installService = installer
+        installer.start()
 
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
@@ -101,18 +106,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let needsFullScan = store.isEmpty || lastID == nil || lastID == sinceNow
             let since: FSEventStreamEventId = needsFullScan ? sinceNow : lastID!
 
-            monitor.start(since: since)
-            scanner.startPeriodicFlush()
-
             if needsFullScan {
                 self.logger.notice("无有效事件历史或索引为空：启动全量基线扫描")
+                monitor.start(since: since)
+                scanner.startPeriodicFlush()
                 scanner.fullScan()
             } else {
+                // 索引已从磁盘加载：基线就绪（须在 monitor.start 前入队，保证重放事件
+                // 创建的安装上下文拿到有效 pre_install_state）
+                installer.markBaselineReady()
                 self.logger.notice("索引已加载 \(store.count) 条，从事件 id=\(lastID!) 重放")
+                monitor.start(since: since)
+                scanner.startPeriodicFlush()
                 model.publish {
                     $0.scanState = .ready
                     $0.indexCount = store.count
                 }
+            }
+
+            DispatchQueue.main.async {
+                self.model.refreshApps(database: database)
             }
         }
     }
@@ -173,6 +186,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showMainWindow() {
         let window = mainWindow ?? makeMainWindow()
         mainWindow = window
+
+        if let database {
+            model.refreshApps(database: database)
+        }
 
         NSApp.activate()
         if window.isMiniaturized { window.deminiaturize(nil) }

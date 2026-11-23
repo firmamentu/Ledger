@@ -110,6 +110,199 @@ final class Database {
         }
     }
 
+    // MARK: - 记账数据（M3）
+
+    struct AppSummary {
+        var bundleID: String
+        var name: String
+        var version: String?
+        var installPath: String?
+        var iconPath: String?
+        var state: String?
+        var footprint: Int64
+        var hasSignatureWarning: Bool
+    }
+
+    func appState(atInstallPath installPath: String) throws -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        let statement = try prepareUnlocked("SELECT state FROM apps WHERE install_path = ? LIMIT 1;")
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, installPath, -1, sqliteTransient)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return sqlite3_column_text(statement, 0).map { String(cString: $0) }
+    }
+
+    func insertApp(bundleID: String, name: String, version: String?, installPath: String, iconPath: String?, firstSeen: Double, state: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        // ON CONFLICT 更新但不覆盖 first_seen（重装应保留首次见到时间）
+        let statement = try prepareUnlocked("""
+        INSERT INTO apps(bundle_id, name, version, install_path, icon_path, first_seen, state)
+        VALUES(?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(bundle_id) DO UPDATE SET
+            name = excluded.name,
+            version = excluded.version,
+            install_path = excluded.install_path,
+            icon_path = excluded.icon_path,
+            state = excluded.state;
+        """)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, bundleID, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 2, name, -1, sqliteTransient)
+        if let version { sqlite3_bind_text(statement, 3, version, -1, sqliteTransient) } else { sqlite3_bind_null(statement, 3) }
+        sqlite3_bind_text(statement, 4, installPath, -1, sqliteTransient)
+        if let iconPath { sqlite3_bind_text(statement, 5, iconPath, -1, sqliteTransient) } else { sqlite3_bind_null(statement, 5) }
+        sqlite3_bind_double(statement, 6, firstSeen)
+        sqlite3_bind_text(statement, 7, state, -1, sqliteTransient)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+        }
+    }
+
+    func insertManifest(appBundleID: String, start: Double, finish: Double, observedScope: String, blindSpots: String, status: String, createdAt: Double) throws -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        let statement = try prepareUnlocked(
+            "INSERT INTO manifests(app_bundle_id, install_started_at, install_finished_at, observed_scope_json, blind_spots_json, status, created_at) VALUES(?, ?, ?, ?, ?, ?, ?);"
+        )
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, appBundleID, -1, sqliteTransient)
+        sqlite3_bind_double(statement, 2, start)
+        sqlite3_bind_double(statement, 3, finish)
+        sqlite3_bind_text(statement, 4, observedScope, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 5, blindSpots, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 6, status, -1, sqliteTransient)
+        sqlite3_bind_double(statement, 7, createdAt)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+        }
+        return sqlite3_last_insert_rowid(handle)
+    }
+
+    func insertManifestItems(_ rows: [(manifestID: Int64, path: String, itemType: String, category: String, size: Int64, mtime: Double, inode: Int64, registrationKind: String?, verdict: String, requiresAdmin: Bool, evidence: String)]) throws {
+        guard !rows.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        try executeUnlocked("BEGIN IMMEDIATE;")
+        do {
+            let statement = try prepareUnlocked(
+                "INSERT INTO manifest_items(manifest_id, path, item_type, category, size_bytes, mtime, inode, registration_kind, verdict, requires_admin, evidence) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
+            )
+            defer { sqlite3_finalize(statement) }
+            for row in rows {
+                sqlite3_bind_int64(statement, 1, row.manifestID)
+                sqlite3_bind_text(statement, 2, row.path, -1, sqliteTransient)
+                sqlite3_bind_text(statement, 3, row.itemType, -1, sqliteTransient)
+                sqlite3_bind_text(statement, 4, row.category, -1, sqliteTransient)
+                sqlite3_bind_int64(statement, 5, row.size)
+                sqlite3_bind_double(statement, 6, row.mtime)
+                sqlite3_bind_int64(statement, 7, row.inode)
+                if let kind = row.registrationKind {
+                    sqlite3_bind_text(statement, 8, kind, -1, sqliteTransient)
+                } else {
+                    sqlite3_bind_null(statement, 8)
+                }
+                sqlite3_bind_text(statement, 9, row.verdict, -1, sqliteTransient)
+                sqlite3_bind_int64(statement, 10, row.requiresAdmin ? 1 : 0)
+                sqlite3_bind_text(statement, 11, row.evidence, -1, sqliteTransient)
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+                }
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+            }
+            try executeUnlocked("COMMIT;")
+        } catch {
+            try? executeUnlocked("ROLLBACK;")
+            throw error
+        }
+    }
+
+    func supersedeManifests(appBundleID: String, except newID: Int64) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        let statement = try prepareUnlocked(
+            "UPDATE manifests SET status = 'superseded' WHERE app_bundle_id = ? AND id != ? AND status != 'superseded';"
+        )
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, appBundleID, -1, sqliteTransient)
+        sqlite3_bind_int64(statement, 2, newID)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+        }
+    }
+
+    func insertAppEvent(ts: Double, bundleID: String, kind: String, detail: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        let statement = try prepareUnlocked(
+            "INSERT INTO app_events(ts, app_bundle_id, kind, detail) VALUES(?, ?, ?, ?);"
+        )
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, ts)
+        sqlite3_bind_text(statement, 2, bundleID, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 3, kind, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 4, detail, -1, sqliteTransient)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+        }
+    }
+
+    func appSummaries() throws -> [AppSummary] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        let statement = try prepareUnlocked("""
+        SELECT a.bundle_id, a.name, a.version, a.install_path, a.icon_path, a.state,
+               COALESCE((SELECT SUM(mi.size_bytes) FROM manifest_items mi
+                         JOIN manifests m ON mi.manifest_id = m.id
+                         WHERE m.app_bundle_id = a.bundle_id AND m.status != 'superseded'), 0),
+               EXISTS(SELECT 1 FROM app_events e
+                      WHERE e.app_bundle_id = a.bundle_id AND e.detail LIKE 'signature_warning%')
+        FROM apps a
+        ORDER BY 7 DESC;
+        """)
+        defer { sqlite3_finalize(statement) }
+
+        var result: [AppSummary] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.append(AppSummary(
+                bundleID: String(cString: sqlite3_column_text(statement, 0)),
+                name: String(cString: sqlite3_column_text(statement, 1)),
+                version: sqlite3_column_text(statement, 2).map { String(cString: $0) },
+                installPath: sqlite3_column_text(statement, 3).map { String(cString: $0) },
+                iconPath: sqlite3_column_text(statement, 4).map { String(cString: $0) },
+                state: sqlite3_column_text(statement, 5).map { String(cString: $0) },
+                footprint: sqlite3_column_int64(statement, 6),
+                hasSignatureWarning: sqlite3_column_int64(statement, 7) != 0
+            ))
+        }
+        return result
+    }
+
+    private func prepareUnlocked(_ sql: String) throws -> OpaquePointer {
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+        }
+        return statement!
+    }
+
     // MARK: - 索引持久化
 
     func loadIndexEntries() throws -> [(path: String, size: Int64, mtime: Double, inode: Int64)] {

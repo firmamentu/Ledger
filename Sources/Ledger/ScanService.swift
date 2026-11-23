@@ -13,6 +13,7 @@ final class ScanService {
     private var lastFullScanAt = Date.distantPast
     private var pendingDirs = Set<String>()  // 在扫的目录（去重，仅本队列访问）
     private var stalledDirs = Set<String>()  // 本会话扫描超时的目录（不再重试，仅本队列访问）
+    var installService: InstallService?  // M3：安装事件钩子（AppDelegate 接线）
 
     init(database: Database, index: IndexStore, model: AppModel) {
         self.database = database
@@ -49,7 +50,16 @@ final class ScanService {
     func applyFileEvents(paths: [String]) {
         queue.async { [weak self] in
             guard let self else { return }
+            var notedApps = Set<String>()  // 批内去重：大安装上万事件只转发每个顶级 .app 一次
             for path in paths {
+                // M3 安装检测钩子：Applications 下的事件只转发给 InstallService，
+                // 不入索引（Applications 不是扫描根）
+                if let appPath = InstallService.topLevelAppPath(for: path) {
+                    if notedApps.insert(appPath).inserted {
+                        self.installService?.noteAppEvent(path)
+                    }
+                    continue
+                }
                 var st = stat()
                 guard lstat(path, &st) == 0 else {
                     self.index.remove(path: path)
@@ -104,6 +114,9 @@ final class ScanService {
             $0.blindSpots = blindSpots
         }
         logger.notice("基线扫描完成：\(total) 项，盲区 \(blindSpots.count) 处")
+
+        // §5.7：基线完成 → 处理基线期间发现的安装（partial manifest，evidence 降为 inference）
+        installService?.onBaselineComplete()
     }
 
     /// 目录重扫（目录级事件）：去重；超时/失败记入 stalledDirs 本会话不再重试；

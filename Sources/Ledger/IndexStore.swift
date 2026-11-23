@@ -38,6 +38,13 @@ final class IndexStore {
         return dirty.count
     }
 
+    /// 索引快照（CoW：快照后 entries 的变更会触发复制，不污染快照）。
+    func snapshot() -> [String: IndexEntry] {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries
+    }
+
     func entry(for path: String) -> IndexEntry? {
         lock.lock()
         defer { lock.unlock() }

@@ -45,7 +45,7 @@ private struct OverviewView: View {
                 )
 
                 HStack(spacing: 12) {
-                    MetricCard(title: "已记录 App", value: "0", systemImage: "square.stack.3d.up")
+                    MetricCard(title: "已记录 App", value: "\(model.apps.count)", systemImage: "square.stack.3d.up")
                     MetricCard(title: "未知项", value: "0", systemImage: "questionmark.circle")
                     MetricCard(title: "今日新增", value: "0 B", systemImage: "arrow.down.circle")
                 }
@@ -55,15 +55,84 @@ private struct OverviewView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("App 足迹")
                         .font(.headline)
-                    EmptyState(
-                        systemImage: "book.closed",
-                        title: "还没有记账记录",
-                        message: "新安装的 App 稳定后，会在这里留下完整足迹。"
-                    )
+                    if model.apps.isEmpty {
+                        EmptyState(
+                            systemImage: "book.closed",
+                            title: "还没有记账记录",
+                            message: "新安装的 App 稳定后，会在这里留下完整足迹。"
+                        )
+                    } else {
+                        AppFootprintList(apps: model.apps)
+                    }
                 }
             }
             .padding(28)
         }
+    }
+}
+
+/// 已记账 App 列表（M3）：图标、名称、足迹大小、状态徽标。
+private struct AppFootprintList: View {
+    let apps: [Database.AppSummary]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(apps, id: \.bundleID) { app in
+                HStack(spacing: 12) {
+                    if let iconPath = app.iconPath, let image = NSImage(contentsOfFile: iconPath) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .frame(width: 28, height: 28)
+                    } else {
+                        Image(systemName: "app")
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 28, height: 28)
+                    }
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(app.name)
+                            .font(.body.weight(.medium))
+                        Text(app.version.map { "v\($0) · \(app.bundleID)" } ?? app.bundleID)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Text(ByteCountFormatter.string(fromByteCount: app.footprint, countStyle: .file))
+                        .font(.callout)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+
+                    badge(for: app)
+                }
+                .padding(.vertical, 8)
+                .padding(.horizontal, 4)
+                Divider()
+            }
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.5))
+        }
+    }
+
+    private func badge(for app: Database.AppSummary) -> some View {
+        let (text, color): (String, Color) = {
+            if app.state == "broken" { return ("安装未完成", .orange) }
+            if app.state == "vanished" { return ("已卸载", .red) }
+            if app.hasSignatureWarning { return ("签名警告", .yellow) }
+            return ("正常", .green)
+        }()
+        return Text(text)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(color.opacity(0.18), in: Capsule())
+            .foregroundStyle(color)
     }
 }
 
