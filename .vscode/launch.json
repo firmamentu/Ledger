@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:Ledger}",
+            "name": "Debug Ledger",
+            "target": "Ledger",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug Ledger"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:Ledger}",
+            "name": "Release Ledger",
+            "target": "Ledger",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release Ledger"
+        }
+    ]
+}
