@@ -251,7 +251,7 @@ final class InstallService {
                 appBundleID: info.bundleID,
                 start: ctx.startedAt.timeIntervalSince1970,
                 finish: finishedAt.timeIntervalSince1970,
-                observedScope: Self.observedScopeJSON,
+                observedScope: Self.observedScopeJSON(database: database),
                 blindSpots: currentBlindSpotsJSON(),
                 status: preScanPartial ? "partial" : "complete",
                 createdAt: finishedAt.timeIntervalSince1970
@@ -308,7 +308,7 @@ final class InstallService {
                 appBundleID: bundleID,
                 start: ctx.startedAt.timeIntervalSince1970,
                 finish: finishedAt.timeIntervalSince1970,
-                observedScope: Self.observedScopeJSON,
+                observedScope: Self.observedScopeJSON(database: database),
                 blindSpots: currentBlindSpotsJSON(),
                 status: "partial",
                 createdAt: finishedAt.timeIntervalSince1970
@@ -471,8 +471,8 @@ final class InstallService {
 
     // MARK: - 范围记录
 
-    static var observedScopeJSON: String {
-        let paths = ScanRoots.roots.map { $0.path }
+    static func observedScopeJSON(database: Database) -> String {
+        let paths = SettingsService.enabledRoots(database: database).map { $0.path }
         return (try? JSONEncoder().encode(paths)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
     }
 

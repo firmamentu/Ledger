@@ -474,6 +474,55 @@ final class Database {
         return result
     }
 
+    /// 保留策略：删除早于 cutoff 的 changes（§14 设置：30 天）。
+    func pruneChanges(olderThan cutoff: Double) throws -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        let statement = try prepareUnlocked("DELETE FROM changes WHERE ts < ?;")
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, cutoff)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+        }
+        return Int(sqlite3_changes(handle))
+    }
+
+    /// 保留策略：删除最旧的 N 条（500MB 上限触发时用）。
+    func pruneOldestChanges(_ count: Int) throws {
+        guard count > 0 else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        let statement = try prepareUnlocked(
+            "DELETE FROM changes WHERE id IN (SELECT id FROM changes ORDER BY id ASC LIMIT ?);"
+        )
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, Int64(count))
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+        }
+    }
+
+    /// changes 统计（设置页展示 + 500MB 上限判断；字节为估算：path 长度 + 固定行开销）。
+    func changesStats() throws -> (count: Int, estimatedBytes: Int64, oldestTs: Double?) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        let statement = try prepareUnlocked(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(path) + 64), 0), MIN(ts) FROM changes;"
+        )
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return (0, 0, nil) }
+        let oldest = sqlite3_column_type(statement, 2) == SQLITE_NULL
+            ? nil
+            : sqlite3_column_double(statement, 2)
+        return (Int(sqlite3_column_int64(statement, 0)), sqlite3_column_int64(statement, 1), oldest)
+    }
+
     func insertReport(createdAt: Double, kind: String, contentJSON: String) throws {
         lock.lock()
         defer { lock.unlock() }

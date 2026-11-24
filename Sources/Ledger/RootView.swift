@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct RootView: View {
     @ObservedObject var model: AppModel
     let database: Database
+    let settings: SettingsService
 
     var body: some View {
         TabView {
@@ -17,7 +18,7 @@ struct RootView: View {
             WeeklyView(model: model, database: database)
                 .tabItem { Label("周报", systemImage: "chart.bar.xaxis") }
 
-            SettingsView(model: model)
+            SettingsView(model: model, settings: settings, database: database)
                 .tabItem { Label("设置", systemImage: "gearshape") }
         }
         .frame(minWidth: 780, minHeight: 520)
@@ -674,9 +675,14 @@ private struct BaselineCard: View {
     }()
 }
 
-/// M2 版设置页：真实展示扫描状态与盲区；勾选/保留策略/暂停等 M7 接入。
+/// 设置页（M7）：扫描根勾选、权限状态、保留策略、通知、暂停、登录自启。
 private struct SettingsView: View {
     @ObservedObject var model: AppModel
+    let settings: SettingsService
+    let database: Database
+    @State private var changesCount = 0
+    @State private var changesBytes: Int64 = 0
+    @State private var changesOldest: Date?
 
     var body: some View {
         ScrollView {
@@ -686,43 +692,107 @@ private struct SettingsView: View {
                     subtitle: "Ledger 只在本机工作，不发送任何数据。"
                 )
 
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("扫描范围")
-                        .font(.headline)
-                    Text("17 个扫描根：~/Library 与 /Library 下的常见应用数据目录。扫描只读取元数据（大小、修改时间、inode），不读文件内容。")
+                section("扫描范围") {
+                    Text("勾选要记账的目录。取消勾选会立即停止监听该目录，并从账本移除它的条目。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(ScanRoots.allRoots, id: \.path) { root in
+                        Toggle(root.path, isOn: Binding(
+                            get: { !SettingsService.disabledRoots(database: database).contains(root.path) },
+                            set: { settings.setRootEnabled(root.path, enabled: $0) }
+                        ))
                         .font(.callout)
+                    }
+                }
+
+                section("权限状态") {
+                    let hasFDA = settings.hasFullDiskAccess()
+                    HStack {
+                        Label(
+                            hasFDA ? "完全磁盘访问权限：已授权" : "完全磁盘访问权限：未授权",
+                            systemImage: hasFDA ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"
+                        )
+                        .foregroundStyle(hasFDA ? .green : .orange)
+                        Spacer()
+                        Button("打开系统设置") {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        .controlSize(.small)
+                    }
+                    Text("盲区：\(model.blindSpots.count) 处。未授权时受保护目录无法读取，Ledger 会如实标注盲区，不假装完整。")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("盲区（未观测目录）")
-                        .font(.headline)
-                    if model.blindSpots.isEmpty {
-                        Text("没有盲区：所有扫描根均可读。")
+                section("记录数据（保留策略）") {
+                    Text("自动保留 30 天；超过约 500MB 时自动清理最旧记录。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Text("\(changesCount) 条 · 约 \(ByteCountFormatter.string(fromByteCount: changesBytes, countStyle: .file))")
                             .font(.callout)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("以下目录无法读取，账本在这些范围内不完整：")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                        ForEach(model.blindSpots, id: \.self) { spot in
-                            HStack(alignment: .top, spacing: 8) {
-                                Image(systemName: "eye.slash")
-                                    .foregroundStyle(.orange)
-                                Text(spot)
-                                    .font(.callout)
-                                    .textSelection(.enabled)
-                            }
+                        if let oldest = changesOldest {
+                            Text("最旧：\(Self.dateFormatter.string(from: oldest))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
-                        Text("授权「完全磁盘访问权限」可补全盲区（系统设置 → 隐私与安全性 → 完全磁盘访问权限）。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("立即清理") {
+                            settings.pruneNow()
+                            reloadStats()
+                        }
+                        .controlSize(.small)
                     }
+                }
+
+                section("通知") {
+                    Toggle("卸载时通知「还有 N 处残留」", isOn: Binding(
+                        get: { settings.notificationsEnabled() },
+                        set: { settings.setNotificationsEnabled($0) }
+                    ))
+                    Text("未授权系统通知时只显示菜单栏红点，不反复请求。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                section("暂停与启动") {
+                    Toggle("暂停记录（菜单栏也可切换）", isOn: Binding(
+                        get: { settings.isPaused() },
+                        set: { settings.setPaused($0) }
+                    ))
+                    Toggle("登录时自动启动 Ledger", isOn: Binding(
+                        get: { settings.launchAtLoginEnabled() },
+                        set: { settings.setLaunchAtLogin($0) }
+                    ))
                 }
             }
             .padding(28)
         }
+        .onAppear(perform: reloadStats)
     }
+
+    private func section(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.headline)
+            content()
+        }
+    }
+
+    private func reloadStats() {
+        let stats = settings.changesStats()
+        changesCount = stats.count
+        changesBytes = stats.estimatedBytes
+        changesOldest = stats.oldestTs.map { Date(timeIntervalSince1970: $0) }
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
 }
 
 private struct PlaceholderTab: View {

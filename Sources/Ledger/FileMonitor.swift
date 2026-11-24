@@ -20,7 +20,7 @@ final class FileMonitor {
     }
 
     /// 从 eventID 开始监听；FSEvents 会自动重放该 id 之后的事件（重启对账，§5.4）。
-    func start(since eventID: FSEventStreamEventId) {
+    func start(since eventID: FSEventStreamEventId, watchPaths: [URL]) {
         var context = FSEventStreamContext(
             version: 0,
             info: Unmanaged.passUnretained(self).toOpaque(),
@@ -32,7 +32,7 @@ final class FileMonitor {
             kFSEventStreamCreateFlagFileEvents
                 | kFSEventStreamCreateFlagIgnoreSelf
         )
-        let paths = ScanRoots.watchPaths.map { $0.path } as CFArray
+        let paths = watchPaths.map { $0.path } as CFArray
 
         guard let stream = FSEventStreamCreate(
             kCFAllocatorDefault,

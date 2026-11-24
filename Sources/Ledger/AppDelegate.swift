@@ -19,7 +19,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var vanishService: VanishService?
     private var cleanupService: CleanupService?
     private var addAppService: AddAppService?
+    private var settingsService: SettingsService?
     private var pendingObserver: AnyCancellable?
+    private var pauseObserver: AnyCancellable?
+    private var pauseMenuItem: NSMenuItem?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // 单实例：持有排他锁直至进程退出；内核在退出时自动释放，崩溃不会留死锁。
@@ -112,6 +115,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             vanisher?.resumeTracking(bundleID)
         }
 
+        let settings = SettingsService(database: database, model: model, index: store)
+        settingsService = settings
+        model.paused = settings.isPaused()
+        settings.onRootsChanged = { [weak self] in
+            self?.restartMonitor()
+        }
+
+        pauseObserver = model.$paused.sink { [weak self] paused in
+            self?.pauseMenuItem?.state = paused ? .on : .off
+        }
+
         // 菜单栏红点：有待处理项时显示
         pendingObserver = model.$hasPending.sink { [weak self] pending in
             self?.updateStatusBadge(pending)
@@ -121,6 +135,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
             self?.scanService?.wakeReconcile()
+            DispatchQueue.global(qos: .utility).async {
+                self?.settingsService?.applyRetentionPolicy()
+            }
         }
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -141,9 +158,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let needsFullScan = store.isEmpty || lastID == nil || lastID == sinceNow
             let since: FSEventStreamEventId = needsFullScan ? sinceNow : lastID!
 
+            // 保留策略（30 天/500MB，§14 设置）
+            self.settingsService?.applyRetentionPolicy()
+
+            DispatchQueue.main.async {
+                self.model.refreshApps(database: database)
+            }
+
+            // 暂停记录（§12）：暂停则完全不监听（重启保持）
+            guard !(self.settingsService?.isPaused() ?? false) else {
+                self.logger.notice("暂停记录状态：跳过监听与扫描")
+                return
+            }
+
             if needsFullScan {
                 self.logger.notice("无有效事件历史或索引为空：启动全量基线扫描")
-                monitor.start(since: since)
+                monitor.start(since: since, watchPaths: self.watchPaths())
                 scanner.startPeriodicFlush()
                 scanner.fullScan()
             } else {
@@ -151,7 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // 创建的安装上下文拿到有效 pre_install_state）
                 installer.markBaselineReady()
                 self.logger.notice("索引已加载 \(store.count) 条，从事件 id=\(lastID!) 重放")
-                monitor.start(since: since)
+                monitor.start(since: since, watchPaths: self.watchPaths())
                 scanner.startPeriodicFlush()
                 model.publish {
                     $0.scanState = .ready
@@ -161,10 +191,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             // 启动对账：Ledger 退出期间的卸载补标 vanished（§12）
             vanishService?.reconcileAtStartup()
+        }
+    }
 
-            DispatchQueue.main.async {
-                self.model.refreshApps(database: database)
-            }
+    /// FSEvents 监听路径 = 启用的扫描根 + ~/.Trash + 两个 Applications 目录（§5.2/§5.5）。
+    private func watchPaths() -> [URL] {
+        guard let database else { return [] }
+        var paths = SettingsService.enabledRoots(database: database)
+        paths += [
+            ScanRoots.trashURL,
+            URL(fileURLWithPath: "/Applications"),
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true),
+        ]
+        return paths
+    }
+
+    /// 扫描根勾选变化后重启监听（since=Now；索引已在 SettingsService 里同步清理）。
+    private func restartMonitor() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self, let monitor = self.fileMonitor else { return }
+            monitor.stop()
+            guard let settings = self.settingsService, !settings.isPaused() else { return }
+            monitor.start(
+                since: FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+                watchPaths: self.watchPaths()
+            )
+        }
+    }
+
+    /// 菜单栏「暂停记录」：暂停 = 停监听与扫描；恢复 = 重启监听 + 全量重扫补课。
+    @objc private func togglePause() {
+        guard let settings = settingsService else { return }
+        let paused = !settings.isPaused()
+        settings.setPaused(paused)
+        if paused {
+            fileMonitor?.stop()
+        } else {
+            restartMonitor()
+            scanService?.fullScan()
         }
     }
 
@@ -200,6 +264,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let openItem = NSMenuItem(title: "打开 Ledger", action: #selector(openLedger), keyEquivalent: "")
         openItem.target = self
         menu.addItem(openItem)
+
+        let pauseItem = NSMenuItem(title: "暂停记录", action: #selector(togglePause), keyEquivalent: "")
+        pauseItem.target = self
+        pauseItem.state = (settingsService?.isPaused() ?? false) ? .on : .off
+        menu.addItem(pauseItem)
+        pauseMenuItem = pauseItem
+
         menu.addItem(.separator())
         let quitItem = NSMenuItem(title: "退出 Ledger", action: #selector(quitLedger), keyEquivalent: "q")
         quitItem.target = self
@@ -248,7 +319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func makeMainWindow() -> NSWindow {
-        let window = NSWindow(contentViewController: NSHostingController(rootView: RootView(model: model, database: database!)))
+        let window = NSWindow(contentViewController: NSHostingController(rootView: RootView(model: model, database: database!, settings: settingsService!)))
         window.title = "Ledger"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.setContentSize(NSSize(width: 940, height: 620))

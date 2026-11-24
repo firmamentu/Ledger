@@ -20,6 +20,7 @@ final class AppModel: ObservableObject {
     @Published var cleanupReport: CleanupReport?
     @Published var weekly: WeeklyReport?
     @Published var weeklyExportPath: String?
+    @Published var paused = false  // 菜单栏同步用（设置页直接走 SettingsService）
     @Published var dailyChanges: [(path: String, appBundleID: String?, kind: String, sizeDelta: Int64)] = []
     @Published var addAppMessage: String?
     @Published var historyEvents: [(ts: Double, bundleID: String, name: String?, kind: String, detail: String)] = []

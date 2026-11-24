@@ -36,17 +36,25 @@ final class ScanService {
     /// 全量基线扫描：17 根逐个扫，每根完成即并入索引；不存在的根跳过，
     /// 不可读根记入盲区（禁止静默跳过，§9）。完成立即落盘。
     func fullScan() {
-        queue.async { [weak self] in self?.performFullScan() }
+        queue.async { [weak self] in
+            guard let self, !self.isPaused else { return }
+            self.performFullScan()
+        }
     }
 
     /// 唤醒对账（§5.4）：轻量 = 节流全量重扫。
     /// shortcut: 唤醒一律全量重扫、1 小时节流，未做增量；代价是每次唤醒后台扫几分钟。
     func wakeReconcile() {
         queue.async { [weak self] in
-            guard let self else { return }
+            guard let self, !self.isPaused else { return }
             guard Date().timeIntervalSince(self.lastFullScanAt) > 3600 else { return }
             self.performFullScan()
         }
+    }
+
+    /// 暂停记录（§12）：不监听、不扫描。
+    var isPaused: Bool {
+        (try? database.metaGet("pause_state")) == "paused"
     }
 
     /// FSEvents 文件/目录事件批量应用（事件队列只转发；索引写与基线快照同队列串行）。
@@ -140,7 +148,7 @@ final class ScanService {
 
         var blindSpots: [String] = []
         var total = 0
-        for root in ScanRoots.roots {
+        for root in SettingsService.enabledRoots(database: database) {
             guard FileManager.default.fileExists(atPath: root.path) else { continue }
 
             let (entries, spots, complete) = scan(url: root, progress: { [weak self] scanned in

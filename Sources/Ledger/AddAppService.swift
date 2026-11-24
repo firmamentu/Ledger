@@ -55,7 +55,7 @@ final class AddAppService {
                 appBundleID: info.bundleID,
                 start: Date().timeIntervalSince1970,
                 finish: Date().timeIntervalSince1970,
-                observedScope: InstallService.observedScopeJSON,
+                observedScope: InstallService.observedScopeJSON(database: database),
                 blindSpots: (try? database.metaGet("baseline_blind_spots")) ?? "[]",
                 status: "partial",
                 createdAt: Date().timeIntervalSince1970

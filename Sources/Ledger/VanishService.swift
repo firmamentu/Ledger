@@ -112,6 +112,15 @@ final class VanishService {
             )
             logger.notice("判定卸载：\(bundleID, privacy: .public)（\(detail, privacy: .public)）")
             refreshUI()
+
+            // §14 通知：开关开启时提示「还有 N 处」
+            if (try? database.metaGet("notifications_enabled")) == "on" {
+                let name = (try? database.appSummaries().first { $0.bundleID == bundleID })?.name ?? bundleID
+                let count = (try? database.manifestItems(for: bundleID))?.count ?? 0
+                DispatchQueue.main.async {
+                    NotificationService.notifyUninstalled(appName: name, residualCount: count)
+                }
+            }
         } catch {
             logger.error("vanish 落库失败：\(error.localizedDescription, privacy: .public)")
         }
