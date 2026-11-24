@@ -90,6 +90,11 @@ final class CleanupService {
                     report.skipped.append((path, "注册项或已无记录"))
                     continue
                 }
+                // §10.5 防御：dont_touch/unknown/需管理员即使被勾选也不删
+                guard row.verdict == "safe" || row.verdict == "caution", !row.requiresAdmin else {
+                    report.skipped.append((path, "系统项，不代执行"))
+                    continue
+                }
                 var st = stat()
                 guard lstat(path, &st) == 0 else {
                     report.skipped.append((path, "已消失"))

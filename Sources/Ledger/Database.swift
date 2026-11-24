@@ -123,6 +123,7 @@ final class Database {
         var hasSignatureWarning: Bool
         var fileCount: Int
         var registrationCount: Int
+        var safeBytes: Int64  // 可安全释放（safe + fact + 非管理员，§10.5 默认勾选集的合计）
     }
 
     func appRow(atInstallPath installPath: String) throws -> (bundleID: String, state: String)? {
@@ -575,7 +576,11 @@ final class Database {
                 WHERE m.app_bundle_id = a.bundle_id AND m.status != 'superseded' AND mi.item_type != 'registration'),
                (SELECT COUNT(*) FROM manifest_items mi
                 JOIN manifests m ON mi.manifest_id = m.id
-                WHERE m.app_bundle_id = a.bundle_id AND m.status != 'superseded' AND mi.item_type = 'registration')
+                WHERE m.app_bundle_id = a.bundle_id AND m.status != 'superseded' AND mi.item_type = 'registration'),
+               (SELECT COALESCE(SUM(mi.size_bytes), 0) FROM manifest_items mi
+                JOIN manifests m ON mi.manifest_id = m.id
+                WHERE m.app_bundle_id = a.bundle_id AND m.status != 'superseded'
+                  AND mi.verdict = 'safe' AND mi.evidence = 'fact' AND mi.requires_admin = 0)
         FROM apps a
         ORDER BY 7 DESC;
         """)
@@ -593,7 +598,8 @@ final class Database {
                 footprint: sqlite3_column_int64(statement, 6),
                 hasSignatureWarning: sqlite3_column_int64(statement, 7) != 0,
                 fileCount: Int(sqlite3_column_int64(statement, 8)),
-                registrationCount: Int(sqlite3_column_int64(statement, 9))
+                registrationCount: Int(sqlite3_column_int64(statement, 9)),
+                safeBytes: sqlite3_column_int64(statement, 10)
             ))
         }
         return result

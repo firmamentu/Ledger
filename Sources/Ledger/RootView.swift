@@ -177,6 +177,12 @@ private struct PendingView: View {
                                         Text(ByteCountFormatter.string(fromByteCount: app.footprint, countStyle: .file))
                                             .font(.callout.weight(.semibold))
                                             .monospacedDigit()
+                                        if app.safeBytes > 0 {
+                                            Text("可释放 \(ByteCountFormatter.string(fromByteCount: app.safeBytes, countStyle: .file))")
+                                                .font(.caption)
+                                                .foregroundStyle(.green)
+                                                .monospacedDigit()
+                                        }
                                     }
 
                                     if app.state == "broken" {
