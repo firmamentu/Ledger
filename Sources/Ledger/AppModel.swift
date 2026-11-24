@@ -16,6 +16,8 @@ final class AppModel: ObservableObject {
     @Published var lastFlushAt: Date?
     @Published var apps: [Database.AppSummary] = []
     @Published var hasPending = false
+    @Published var residualSheetApp: Database.AppSummary?
+    @Published var cleanupReport: CleanupReport?
 
     /// 待处理 = vanished + broken（appSummaries 已按足迹降序）。
     var pendingApps: [Database.AppSummary] {
@@ -24,6 +26,17 @@ final class AppModel: ObservableObject {
 
     /// 「只是移动了它？」动作（AppDelegate 接线到 VanishService）。
     var onMarkAsMoved: ((String) -> Void)?
+    /// 打开残留清单（AppDelegate 接线到 CleanupService：vanished → verified）。
+    var onOpenResiduals: ((String) -> Void)?
+    /// 执行清理（AppDelegate 接线到 CleanupService）。
+    var onCleanup: ((String, [String], String) -> Void)?
+    /// 明确选择保留（AppDelegate 接线到 CleanupService：→ settled）。
+    var onKeep: ((String) -> Void)?
+
+    func openResiduals(_ app: Database.AppSummary) {
+        residualSheetApp = app
+        onOpenResiduals?(app.bundleID)
+    }
 
     /// 后台线程 → 主线程更新 UI 状态。
     func publish(_ update: @escaping (AppModel) -> Void) {
@@ -35,4 +48,8 @@ final class AppModel: ObservableObject {
         apps = (try? database.appSummaries()) ?? []
         hasPending = apps.contains { $0.state == "vanished" || $0.state == "broken" }
     }
+}
+
+extension Database.AppSummary: Identifiable {
+    public var id: String { bundleID }
 }

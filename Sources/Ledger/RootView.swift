@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RootView: View {
     @ObservedObject var model: AppModel
+    let database: Database
 
     var body: some View {
         TabView {
@@ -24,6 +25,14 @@ struct RootView: View {
                 .tabItem { Label("设置", systemImage: "gearshape") }
         }
         .frame(minWidth: 780, minHeight: 520)
+        .sheet(item: $model.residualSheetApp) { app in
+            ResidualSheet(model: model, app: app, database: database)
+        }
+        .onChange(of: model.residualSheetApp?.bundleID) { _ in
+            if model.residualSheetApp == nil {
+                model.cleanupReport = nil  // 关闭清单时清掉上次报告
+            }
+        }
     }
 }
 
@@ -137,6 +146,8 @@ private struct PendingView: View {
                             }
                             .padding(.vertical, 10)
                             .padding(.horizontal, 4)
+                            .contentShape(Rectangle())
+                            .onTapGesture { model.openResiduals(app) }
                             Divider()
                         }
                     }
@@ -215,6 +226,8 @@ private struct AppFootprintList: View {
         let (text, color): (String, Color) = {
             if app.state == "broken" { return ("安装未完成", .orange) }
             if app.state == "vanished" { return ("已卸载", .red) }
+            if app.state == "verified" { return ("已核对", .blue) }
+            if app.state == "settled" { return ("已处理", .gray) }
             if app.hasSignatureWarning { return ("签名警告", .yellow) }
             return ("正常", .green)
         }()

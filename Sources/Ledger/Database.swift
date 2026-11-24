@@ -296,6 +296,70 @@ final class Database {
         }
     }
 
+    struct ManifestItemRow {
+        var path: String
+        var itemType: String
+        var category: String
+        var size: Int64
+        var mtime: Double
+        var inode: Int64
+        var registrationKind: String?
+        var verdict: String
+        var requiresAdmin: Bool
+        var evidence: String
+    }
+
+    /// 最新非 superseded manifest 的条目（残留清单用）。
+    func manifestItems(for bundleID: String) throws -> [ManifestItemRow] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        let statement = try prepareUnlocked("""
+        SELECT mi.path, mi.item_type, mi.category, mi.size_bytes, mi.mtime, mi.inode,
+               mi.registration_kind, mi.verdict, mi.requires_admin, mi.evidence
+        FROM manifest_items mi
+        JOIN manifests m ON mi.manifest_id = m.id
+        WHERE m.app_bundle_id = ? AND m.status != 'superseded';
+        """)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, bundleID, -1, sqliteTransient)
+
+        var result: [ManifestItemRow] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.append(ManifestItemRow(
+                path: String(cString: sqlite3_column_text(statement, 0)),
+                itemType: String(cString: sqlite3_column_text(statement, 1)),
+                category: String(cString: sqlite3_column_text(statement, 2)),
+                size: sqlite3_column_int64(statement, 3),
+                mtime: sqlite3_column_double(statement, 4),
+                inode: sqlite3_column_int64(statement, 5),
+                registrationKind: sqlite3_column_text(statement, 6).map { String(cString: $0) },
+                verdict: String(cString: sqlite3_column_text(statement, 7)),
+                requiresAdmin: sqlite3_column_int64(statement, 8) != 0,
+                evidence: String(cString: sqlite3_column_text(statement, 9))
+            ))
+        }
+        return result
+    }
+
+    func insertReport(createdAt: Double, kind: String, contentJSON: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        let statement = try prepareUnlocked(
+            "INSERT INTO reports(created_at, kind, content_json) VALUES(?, ?, ?);"
+        )
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, createdAt)
+        sqlite3_bind_text(statement, 2, kind, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 3, contentJSON, -1, sqliteTransient)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+        }
+    }
+
     func insertAppEvent(ts: Double, bundleID: String, kind: String, detail: String) throws {
         lock.lock()
         defer { lock.unlock() }

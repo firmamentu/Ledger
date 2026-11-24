@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var fileMonitor: FileMonitor?
     private var installService: InstallService?
     private var vanishService: VanishService?
+    private var cleanupService: CleanupService?
     private var pendingObserver: AnyCancellable?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -90,6 +91,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scanner.vanishService = vanisher
         model.onMarkAsMoved = { [weak vanisher] bundleID in
             vanisher?.markAsMoved(bundleID)
+        }
+
+        let cleaner = CleanupService(database: database, model: model)
+        cleanupService = cleaner
+        model.onOpenResiduals = { [weak cleaner] bundleID in
+            cleaner?.openVerification(bundleID)
+        }
+        model.onCleanup = { [weak cleaner] bundleID, paths, name in
+            cleaner?.cleanup(bundleID: bundleID, checkedPaths: paths, appName: name)
+        }
+        model.onKeep = { [weak cleaner] bundleID in
+            cleaner?.keep(bundleID)
         }
 
         // 菜单栏红点：有待处理项时显示
@@ -228,7 +241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func makeMainWindow() -> NSWindow {
-        let window = NSWindow(contentViewController: NSHostingController(rootView: RootView(model: model)))
+        let window = NSWindow(contentViewController: NSHostingController(rootView: RootView(model: model, database: database!)))
         window.title = "Ledger"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.setContentSize(NSSize(width: 940, height: 620))
