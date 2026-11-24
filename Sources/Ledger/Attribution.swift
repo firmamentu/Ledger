@@ -28,6 +28,11 @@ enum Attribution {
     private static let cautionSegments = ["Application Support", "Containers", "Group Containers", "Application Scripts", "Preferences"]
     private static let dontTouchSegments = ["TCC", "BTM", "Keychain", "System Extensions"]
 
+    /// 识别轨（手动添加已装 App，§1 边界）：索引中按 fact 规则归属该 App 的路径集合。
+    static func attributedPaths(index: [String: IndexEntry], bundleID: String, names: [String]) -> Set<String> {
+        Set(index.keys.filter { evidence(path: $0, bundleID: bundleID, names: names) == "fact" })
+    }
+
     /// 注册项 verdict（§10.1 未列其余注册项 → unknown，禁止猜测）；
     /// system_extension/btm/tcc 明确归 dont_touch。
     static func verdict(path: String?, registrationKind: String?) -> String {

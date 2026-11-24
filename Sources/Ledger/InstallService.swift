@@ -30,7 +30,7 @@ final class InstallService {
         var extensions: Set<String> = []
     }
 
-    private struct AppInfo {
+    struct AppInfo {
         var bundleID: String
         var name: String
         var version: String?
@@ -166,7 +166,7 @@ final class InstallService {
                 finalize(ctx, preScanPartial: false)
             } else if now.timeIntervalSince(ctx.startedAt) >= 30 * 60 {
                 toRemove.append(path)
-                finalizeBroken(ctx, info: readPlistInfo(ctx.appPath), reason: "30 分钟未稳定")
+                finalizeBroken(ctx, info: Self.readPlistInfo(ctx.appPath), reason: "30 分钟未稳定")
             }
         }
         for path in toRemove {
@@ -178,7 +178,7 @@ final class InstallService {
 
     private func finalize(_ ctx: Context, preScanPartial: Bool) {
         let finishedAt = Date()
-        guard let info = readPlistInfo(ctx.appPath) else {
+        guard let info = Self.readPlistInfo(ctx.appPath) else {
             finalizeBroken(ctx, info: nil, reason: "结构校验失败：Info.plist 缺失或不可读")
             return
         }
@@ -241,7 +241,7 @@ final class InstallService {
         }
 
         do {
-            let iconPath = cacheIcon(appPath: ctx.appPath, bundleID: info.bundleID)
+            let iconPath = InstallService.cacheIcon(appPath: ctx.appPath, bundleID: info.bundleID)
             try database.insertApp(
                 bundleID: info.bundleID, name: info.name, version: info.version,
                 installPath: ctx.appPath, iconPath: iconPath,
@@ -374,7 +374,8 @@ final class InstallService {
     // MARK: - 校验与读取
 
     /// 只读 Info.plist（§10.3：bundle-id 读取失败按 App 名匹配 → 文件名兜底）。
-    private func readPlistInfo(_ appPath: String) -> AppInfo? {
+    /// internal static：AddAppService（识别轨手动登记）复用。
+    static func readPlistInfo(_ appPath: String) -> AppInfo? {
         let plistURL = URL(fileURLWithPath: appPath).appendingPathComponent("Contents/Info.plist")
         guard let data = try? Data(contentsOf: plistURL),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
@@ -413,7 +414,7 @@ final class InstallService {
         return Subprocess.waitBounded(process, timeout: 10) == 0
     }
 
-    private func cacheIcon(appPath: String, bundleID: String) -> String? {
+    static func cacheIcon(appPath: String, bundleID: String) -> String? {
         let resources = URL(fileURLWithPath: appPath).appendingPathComponent("Contents/Resources")
         guard let entries = try? FileManager.default.contentsOfDirectory(at: resources, includingPropertiesForKeys: nil),
               let icns = entries.filter({ $0.pathExtension == "icns" }).max(by: {
@@ -470,7 +471,7 @@ final class InstallService {
 
     // MARK: - 范围记录
 
-    private static var observedScopeJSON: String {
+    static var observedScopeJSON: String {
         let paths = ScanRoots.roots.map { $0.path }
         return (try? JSONEncoder().encode(paths)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
     }

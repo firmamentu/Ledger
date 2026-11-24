@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var installService: InstallService?
     private var vanishService: VanishService?
     private var cleanupService: CleanupService?
+    private var addAppService: AddAppService?
     private var pendingObserver: AnyCancellable?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -100,6 +101,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         model.onKeep = { [weak cleaner] bundleID in
             cleaner?.keep(bundleID)
+        }
+
+        let adder = AddAppService(database: database, index: store, model: model)
+        addAppService = adder
+        model.onAddApp = { [weak adder] path, completion in
+            adder?.addExistingApp(path: path, completion: completion)
+        }
+        model.onResumeTracking = { [weak vanisher] bundleID in
+            vanisher?.resumeTracking(bundleID)
         }
 
         // 菜单栏红点：有待处理项时显示

@@ -31,6 +31,24 @@ final class VanishService {
         queue.async { [weak self] in self?.undoMisreport(bundleID) }
     }
 
+    /// 重新追踪：把已处理（settled/verified）的 App 放回 tracked，重新开始记录其变化。
+    func resumeTracking(_ bundleID: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            do {
+                try self.database.setAppState(bundleID: bundleID, state: "tracked")
+                try self.database.insertAppEvent(
+                    ts: Date().timeIntervalSince1970, bundleID: bundleID,
+                    kind: "restored", detail: "user_resumed_tracking"
+                )
+                self.logger.notice("重新追踪：\(bundleID, privacy: .public)")
+                self.refreshUI()
+            } catch {
+                self.logger.error("重新追踪失败：\(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
     private func handleRemoval(_ appPath: String) {
         guard let row = try? database.appRow(atInstallPath: appPath),
               row.state == "recorded" || row.state == "tracked" else { return }

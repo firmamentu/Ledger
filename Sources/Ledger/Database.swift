@@ -422,6 +422,58 @@ final class Database {
         return Int(sqlite3_column_int64(statement, 0))
     }
 
+    /// 操作痕迹时间线（待处理页「历史」分区）。
+    func appEventsHistory(limit: Int) throws -> [(ts: Double, bundleID: String, name: String?, kind: String, detail: String)] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        let statement = try prepareUnlocked("""
+        SELECT e.ts, e.app_bundle_id, a.name, e.kind, e.detail
+        FROM app_events e
+        LEFT JOIN apps a ON a.bundle_id = e.app_bundle_id
+        ORDER BY e.id DESC
+        LIMIT ?;
+        """)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, Int64(limit))
+
+        var result: [(ts: Double, bundleID: String, name: String?, kind: String, detail: String)] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.append((
+                ts: sqlite3_column_double(statement, 0),
+                bundleID: String(cString: sqlite3_column_text(statement, 1)),
+                name: sqlite3_column_text(statement, 2).map { String(cString: $0) },
+                kind: String(cString: sqlite3_column_text(statement, 3)),
+                detail: sqlite3_column_text(statement, 4).map { String(cString: $0) } ?? ""
+            ))
+        }
+        return result
+    }
+
+    /// 清理报告列表（历史分区）。
+    func reportsList(limit: Int) throws -> [(createdAt: Double, kind: String, contentJSON: String)] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        let statement = try prepareUnlocked("""
+        SELECT created_at, kind, content_json FROM reports ORDER BY id DESC LIMIT ?;
+        """)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, Int64(limit))
+
+        var result: [(createdAt: Double, kind: String, contentJSON: String)] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.append((
+                createdAt: sqlite3_column_double(statement, 0),
+                kind: String(cString: sqlite3_column_text(statement, 1)),
+                contentJSON: sqlite3_column_text(statement, 2).map { String(cString: $0) } ?? "{}"
+            ))
+        }
+        return result
+    }
+
     func insertReport(createdAt: Double, kind: String, contentJSON: String) throws {
         lock.lock()
         defer { lock.unlock() }
