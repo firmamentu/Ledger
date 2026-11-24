@@ -178,7 +178,7 @@ private struct ItemRow: View {
                     .font(.caption2)
                     .foregroundStyle(item.row.requiresAdmin ? .orange : .secondary)
 
-                Text(item.row.evidence == "fact" ? "确证" : "推断")
+                Text(evidenceLabel(item.row.evidence))
                     .font(.caption2)
                     .foregroundStyle(item.row.evidence == "fact" ? .green : .secondary)
 
@@ -210,6 +210,14 @@ private struct ItemRow: View {
         .padding(.horizontal, 4)
         .contentShape(Rectangle())
         .onTapGesture { expanded.toggle() }
+    }
+
+    private func evidenceLabel(_ evidence: String) -> String {
+        switch evidence {
+        case "fact": return "确证"
+        case "inference": return "推断"
+        default: return "未知"
+        }
     }
 }
 
@@ -283,8 +291,8 @@ private struct ReportView: View {
                         .font(.caption)
                         .textSelection(.enabled)
                 }
-                ForEach(report.kept, id: \.self) { path in
-                    Text("\(path)（未勾选）")
+                ForEach(report.kept, id: \.path) { item in
+                    Text("\(item.path)（\(item.reason)）")
                         .font(.caption)
                         .textSelection(.enabled)
                 }

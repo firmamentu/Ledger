@@ -9,7 +9,7 @@ struct CleanupReport {
     var appName: String
     var trashed: [(path: String, size: Int64)] = []
     var skipped: [(path: String, reason: String)] = []
-    var kept: [String] = []
+    var kept: [(path: String, reason: String)] = []
     var reportPath: String?
 }
 
@@ -77,7 +77,10 @@ final class CleanupService {
             }
             defer { self.finishCleanup(report) }  // 值捕获：退出时用最终状态
             let byPath = Dictionary(uniqueKeysWithValues: rows.map { ($0.path, $0) })
-            report.kept = rows.map(\.path).filter { !checkedPaths.contains($0) }
+            report.kept = rows.compactMap { row in
+                checkedPaths.contains(row.path) ? nil
+                    : (row.path, row.registrationKind != nil || row.requiresAdmin ? "系统项，不代执行" : "未勾选")
+            }
 
             // 文件先、目录按深度降序，避免目录连带子项导致二次 trash 失败
             let ordered = checkedPaths.sorted { a, b in
@@ -137,7 +140,7 @@ final class CleanupService {
             let content: [String: Any] = [
                 "trashed": report.trashed.map { ["path": $0.path, "size": $0.size] },
                 "skipped": report.skipped.map { ["path": $0.path, "reason": $0.reason] },
-                "kept": report.kept,
+                "kept": report.kept.map { ["path": $0.path, "reason": $0.reason] },
                 "report_path": report.reportPath ?? "",
             ]
             if let data = try? JSONSerialization.data(withJSONObject: content),
@@ -195,8 +198,8 @@ final class CleanupService {
             for item in report.skipped {
                 lines.append("- `\(item.path)`（\(item.reason)）")
             }
-            for path in report.kept {
-                lines.append("- `\(path)`（未勾选）")
+            for item in report.kept {
+                lines.append("- `\(item.path)`（\(item.reason)）")
             }
         }
         lines.append("")
