@@ -104,10 +104,22 @@ final class InstallService {
 
         do {
             // recorded/tracked → 更新/修改，不触发记账（§5.2）；
-            // broken → 重新安装，重走稳定判定（§7 broken → installing）
-            if let state = try database.appState(atInstallPath: appPath),
-               state == "recorded" || state == "tracked" {
-                return
+            // broken → 重新安装，重走稳定判定（§7 broken → installing）；
+            // vanished 同路径重现 → 恢复：状态回 tracked，撤下待处理，保留原 manifest（§5.6）
+            if let row = try database.appRow(atInstallPath: appPath) {
+                if row.state == "recorded" || row.state == "tracked" {
+                    return
+                }
+                if row.state == "vanished" {
+                    try database.setAppState(bundleID: row.bundleID, state: "tracked")
+                    try database.insertAppEvent(
+                        ts: Date().timeIntervalSince1970, bundleID: row.bundleID,
+                        kind: "restored", detail: "same_path_reappeared"
+                    )
+                    logger.notice("App 恢复（同路径重现）：\(row.bundleID, privacy: .public)")
+                    refreshUI()
+                    return
+                }
             }
         } catch {
             logger.error("查询 apps 失败：\(error.localizedDescription, privacy: .public)")
@@ -398,7 +410,7 @@ final class InstallService {
         } catch {
             return false
         }
-        return waitBounded(process, timeout: 10) == 0
+        return Subprocess.waitBounded(process, timeout: 10) == 0
     }
 
     private func cacheIcon(appPath: String, bundleID: String) -> String? {
@@ -447,35 +459,7 @@ final class InstallService {
     }
 
     private func runLines(_ executable: String, _ arguments: [String]) -> [String] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-        } catch {
-            return []
-        }
-        _ = waitBounded(process, timeout: 10)
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?.split(separator: "\n").map(String.init) ?? []
-    }
-
-    /// 有界等待子进程：超时 SIGTERM，3 秒后升级 SIGKILL（与扫描 find 同款防护）。
-    private func waitBounded(_ process: Process, timeout: TimeInterval) -> Int32 {
-        let pid = process.processIdentifier
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-            if process.isRunning {
-                process.terminate()
-                DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
-                    kill(pid, SIGKILL)
-                }
-            }
-        }
-        process.waitUntilExit()
-        return process.terminationStatus
+        Subprocess.runLines(executable, arguments)
     }
 
     private func isDirectory(_ path: String) -> Bool {

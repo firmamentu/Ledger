@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Combine
 import os
 
 @MainActor
@@ -15,6 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var scanService: ScanService?
     private var fileMonitor: FileMonitor?
     private var installService: InstallService?
+    private var vanishService: VanishService?
+    private var pendingObserver: AnyCancellable?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // 单实例：持有排他锁直至进程退出；内核在退出时自动释放，崩溃不会留死锁。
@@ -82,6 +85,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scanner.installService = installer
         installer.start()
 
+        let vanisher = VanishService(database: database, model: model)
+        vanishService = vanisher
+        scanner.vanishService = vanisher
+        model.onMarkAsMoved = { [weak vanisher] bundleID in
+            vanisher?.markAsMoved(bundleID)
+        }
+
+        // 菜单栏红点：有待处理项时显示
+        pendingObserver = model.$hasPending.sink { [weak self] pending in
+            self?.updateStatusBadge(pending)
+        }
+
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -123,6 +138,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     $0.indexCount = store.count
                 }
             }
+
+            // 启动对账：Ledger 退出期间的卸载补标 vanished（§12）
+            vanishService?.reconcileAtStartup()
 
             DispatchQueue.main.async {
                 self.model.refreshApps(database: database)
@@ -169,6 +187,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem = item
         statusMenu = menu
+        updateStatusBadge(model.hasPending)
+    }
+
+    /// 待处理红点：图标旁显示红色 ●。
+    private func updateStatusBadge(_ pending: Bool) {
+        guard let button = statusItem?.button else { return }
+        button.title = pending ? "●" : ""
+        if pending {
+            button.attributedTitle = NSAttributedString(
+                string: "●",
+                attributes: [.foregroundColor: NSColor.systemRed, .font: NSFont.systemFont(ofSize: 9)]
+            )
+        }
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {

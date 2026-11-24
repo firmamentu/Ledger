@@ -121,18 +121,71 @@ final class Database {
         var state: String?
         var footprint: Int64
         var hasSignatureWarning: Bool
+        var fileCount: Int
+        var registrationCount: Int
     }
 
-    func appState(atInstallPath installPath: String) throws -> String? {
+    func appRow(atInstallPath installPath: String) throws -> (bundleID: String, state: String)? {
         lock.lock()
         defer { lock.unlock() }
         guard let handle else { throw DatabaseError.open("数据库已关闭") }
 
-        let statement = try prepareUnlocked("SELECT state FROM apps WHERE install_path = ? LIMIT 1;")
+        let statement = try prepareUnlocked("SELECT bundle_id, state FROM apps WHERE install_path = ? LIMIT 1;")
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_text(statement, 1, installPath, -1, sqliteTransient)
         guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
-        return sqlite3_column_text(statement, 0).map { String(cString: $0) }
+        return (
+            String(cString: sqlite3_column_text(statement, 0)),
+            String(cString: sqlite3_column_text(statement, 1))
+        )
+    }
+
+    func setAppState(bundleID: String, state: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        let statement = try prepareUnlocked("UPDATE apps SET state = ? WHERE bundle_id = ?;")
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, state, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 2, bundleID, -1, sqliteTransient)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+        }
+    }
+
+    func setAppInstallPath(bundleID: String, installPath: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        let statement = try prepareUnlocked("UPDATE apps SET install_path = ? WHERE bundle_id = ?;")
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, installPath, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 2, bundleID, -1, sqliteTransient)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+        }
+    }
+
+    /// recorded/tracked 的 App（启动对账用，§12 Ledger 退出期卸载）。
+    func trackedApps() throws -> [(bundleID: String, installPath: String?, state: String)] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        let statement = try prepareUnlocked("SELECT bundle_id, install_path, state FROM apps WHERE state IN ('recorded', 'tracked');")
+        defer { sqlite3_finalize(statement) }
+
+        var result: [(bundleID: String, installPath: String?, state: String)] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.append((
+                String(cString: sqlite3_column_text(statement, 0)),
+                sqlite3_column_text(statement, 1).map { String(cString: $0) },
+                String(cString: sqlite3_column_text(statement, 2))
+            ))
+        }
+        return result
     }
 
     func insertApp(bundleID: String, name: String, version: String?, installPath: String, iconPath: String?, firstSeen: Double, state: String) throws {
@@ -272,7 +325,13 @@ final class Database {
                          JOIN manifests m ON mi.manifest_id = m.id
                          WHERE m.app_bundle_id = a.bundle_id AND m.status != 'superseded'), 0),
                EXISTS(SELECT 1 FROM app_events e
-                      WHERE e.app_bundle_id = a.bundle_id AND e.detail LIKE 'signature_warning%')
+                      WHERE e.app_bundle_id = a.bundle_id AND e.detail LIKE 'signature_warning%'),
+               (SELECT COUNT(*) FROM manifest_items mi
+                JOIN manifests m ON mi.manifest_id = m.id
+                WHERE m.app_bundle_id = a.bundle_id AND m.status != 'superseded' AND mi.item_type != 'registration'),
+               (SELECT COUNT(*) FROM manifest_items mi
+                JOIN manifests m ON mi.manifest_id = m.id
+                WHERE m.app_bundle_id = a.bundle_id AND m.status != 'superseded' AND mi.item_type = 'registration')
         FROM apps a
         ORDER BY 7 DESC;
         """)
@@ -288,7 +347,9 @@ final class Database {
                 iconPath: sqlite3_column_text(statement, 4).map { String(cString: $0) },
                 state: sqlite3_column_text(statement, 5).map { String(cString: $0) },
                 footprint: sqlite3_column_int64(statement, 6),
-                hasSignatureWarning: sqlite3_column_int64(statement, 7) != 0
+                hasSignatureWarning: sqlite3_column_int64(statement, 7) != 0,
+                fileCount: Int(sqlite3_column_int64(statement, 8)),
+                registrationCount: Int(sqlite3_column_int64(statement, 9))
             ))
         }
         return result

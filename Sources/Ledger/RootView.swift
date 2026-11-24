@@ -8,14 +8,8 @@ struct RootView: View {
             OverviewView(model: model)
                 .tabItem { Label("概览", systemImage: "square.grid.2x2") }
 
-            PlaceholderTab(
-                title: "待处理",
-                subtitle: "已从应用程序文件夹消失、但仍有足迹留在本机的 App。",
-                systemImage: "tray",
-                emptyTitle: "没有待处理项",
-                emptyMessage: "App 被卸载后，它的残留会在这里等待你核对。"
-            )
-            .tabItem { Label("待处理", systemImage: "tray") }
+            PendingView(model: model)
+                .tabItem { Label("待处理", systemImage: "tray") }
 
             PlaceholderTab(
                 title: "周报",
@@ -68,6 +62,103 @@ private struct OverviewView: View {
             }
             .padding(28)
         }
+    }
+}
+
+/// 待处理页（M4）：vanished、broken 按残留大小降序；vanished 带「只是移动了它？」撤销入口。
+private struct PendingView: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 26) {
+                PageHeader(
+                    title: "待处理",
+                    subtitle: "已从应用程序文件夹消失、或安装未完成的 App。"
+                )
+
+                if model.pendingApps.isEmpty {
+                    EmptyState(
+                        systemImage: "tray",
+                        title: "没有待处理项",
+                        message: "App 被卸载后，它的残留会在这里等待你核对。"
+                    )
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(model.pendingApps, id: \.bundleID) { app in
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(spacing: 12) {
+                                    if let iconPath = app.iconPath, let image = NSImage(contentsOfFile: iconPath) {
+                                        Image(nsImage: image)
+                                            .resizable()
+                                            .frame(width: 28, height: 28)
+                                    } else {
+                                        Image(systemName: "app")
+                                            .font(.title3)
+                                            .foregroundStyle(.secondary)
+                                            .frame(width: 28, height: 28)
+                                    }
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(app.name)
+                                            .font(.body.weight(.medium))
+                                        Text(app.bundleID)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+
+                                    Spacer()
+
+                                    VStack(alignment: .trailing, spacing: 2) {
+                                        Text("\(app.fileCount) 项 · \(app.registrationCount) 注册项")
+                                            .font(.callout)
+                                            .foregroundStyle(.secondary)
+                                        Text(ByteCountFormatter.string(fromByteCount: app.footprint, countStyle: .file))
+                                            .font(.callout.weight(.semibold))
+                                            .monospacedDigit()
+                                    }
+
+                                    if app.state == "broken" {
+                                        badge("安装未完成", color: .orange)
+                                    } else {
+                                        badge("已卸载", color: .red)
+                                    }
+                                }
+
+                                if app.state == "vanished" {
+                                    HStack {
+                                        Spacer()
+                                        Button("只是移动了它？标为移动") {
+                                            model.onMarkAsMoved?(app.bundleID)
+                                        }
+                                        .controlSize(.small)
+                                    }
+                                }
+                            }
+                            .padding(.vertical, 10)
+                            .padding(.horizontal, 4)
+                            Divider()
+                        }
+                    }
+                    .padding(10)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12)
+                            .strokeBorder(Color(nsColor: .separatorColor).opacity(0.5))
+                    }
+                }
+            }
+            .padding(28)
+        }
+    }
+
+    private func badge(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(color.opacity(0.18), in: Capsule())
+            .foregroundStyle(color)
     }
 }
 
