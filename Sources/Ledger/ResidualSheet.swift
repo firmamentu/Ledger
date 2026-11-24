@@ -15,7 +15,9 @@ struct ResidualSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             if let report = model.cleanupReport, report.bundleID == app.bundleID {
-                ReportView(report: report)
+                ReportView(report: report) {
+                    model.residualSheetApp = nil
+                }
             } else if loading {
                 ProgressView("正在核对残留…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -27,11 +29,18 @@ struct ResidualSheet: View {
         }
         .frame(width: 720, height: 560)
         .overlay(alignment: .topTrailing) {
-            Button("保留（不再提示）") {
-                model.onKeep?(app.bundleID)
-                model.residualSheetApp = nil
+            HStack(spacing: 8) {
+                Button("关闭") {
+                    model.residualSheetApp = nil
+                }
+                .controlSize(.small)
+
+                Button("保留（不再提示）") {
+                    model.onKeep?(app.bundleID)
+                    model.residualSheetApp = nil
+                }
+                .controlSize(.small)
             }
-            .controlSize(.small)
             .padding(10)
         }
     }
@@ -266,11 +275,18 @@ private struct CommandRow: View {
 
 private struct ReportView: View {
     let report: CleanupReport
+    let onClose: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("清理报告")
-                .font(.title3.weight(.semibold))
+            HStack {
+                Text("清理报告")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Button("完成") {
+                    onClose()
+                }
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("删了什么（\(report.trashed.count) 项，已在废纸篓）")

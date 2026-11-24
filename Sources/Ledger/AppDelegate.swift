@@ -95,9 +95,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let cleaner = CleanupService(database: database, model: model)
         cleanupService = cleaner
-        model.onOpenResiduals = { [weak cleaner] bundleID in
-            cleaner?.openVerification(bundleID)
-        }
         model.onCleanup = { [weak cleaner] bundleID, paths, name in
             cleaner?.cleanup(bundleID: bundleID, checkedPaths: paths, appName: name)
         }

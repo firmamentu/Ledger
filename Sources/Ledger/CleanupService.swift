@@ -26,27 +26,9 @@ final class CleanupService {
         self.supportDirectory = supportDirectory
     }
 
-    /// §7 vanished → verified：用户打开残留清单。broken 无此转移，保持原状态。
-    func openVerification(_ bundleID: String) {
-        queue.async { [weak self] in
-            guard let self else { return }
-            do {
-                guard (try? self.database.appSummaries().first { $0.bundleID == bundleID })?.state == "vanished" else {
-                    return
-                }
-                try self.database.setAppState(bundleID: bundleID, state: "verified")
-                try self.database.insertAppEvent(
-                    ts: Date().timeIntervalSince1970, bundleID: bundleID,
-                    kind: "vanished", detail: "verification_opened"
-                )
-                self.refreshUI()
-            } catch {
-                self.logger.error("verified 落库失败：\(error.localizedDescription, privacy: .public)")
-            }
-        }
-    }
-
     /// §7 verified → settled：用户明确选择「保留」。
+    /// （打开清单不再转 verified：该转移让「看一眼」就撤下待处理且无法自由关闭，
+    /// 按用户反馈移除，见 devlog；状态只由清理完成或明确保留推进到 settled。）
     func keep(_ bundleID: String) {
         queue.async { [weak self] in
             guard let self else { return }

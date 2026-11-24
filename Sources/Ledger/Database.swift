@@ -343,6 +343,85 @@ final class Database {
         return result
     }
 
+    /// 批量写入 changes（追踪，§8）。
+    func insertChanges(_ rows: [(ts: Double, path: String, appBundleID: String?, kind: String, sizeDelta: Int64, evidence: String)]) throws {
+        guard !rows.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        try executeUnlocked("BEGIN IMMEDIATE;")
+        do {
+            let statement = try prepareUnlocked(
+                "INSERT INTO changes(ts, path, app_bundle_id, kind, size_delta, evidence) VALUES(?, ?, ?, ?, ?, ?);"
+            )
+            defer { sqlite3_finalize(statement) }
+            for row in rows {
+                sqlite3_bind_double(statement, 1, row.ts)
+                sqlite3_bind_text(statement, 2, row.path, -1, sqliteTransient)
+                if let bundleID = row.appBundleID {
+                    sqlite3_bind_text(statement, 3, bundleID, -1, sqliteTransient)
+                } else {
+                    sqlite3_bind_null(statement, 3)
+                }
+                sqlite3_bind_text(statement, 4, row.kind, -1, sqliteTransient)
+                sqlite3_bind_int64(statement, 5, row.sizeDelta)
+                sqlite3_bind_text(statement, 6, row.evidence, -1, sqliteTransient)
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw DatabaseError.execution(String(cString: sqlite3_errmsg(handle)))
+                }
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+            }
+            try executeUnlocked("COMMIT;")
+        } catch {
+            try? executeUnlocked("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// 周报查询：时间窗口内的 changes（§14 周报）。
+    func weeklyChanges(start: Double, end: Double) throws -> [(ts: Double, path: String, appBundleID: String?, kind: String, sizeDelta: Int64)] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        let statement = try prepareUnlocked(
+            "SELECT ts, path, app_bundle_id, kind, size_delta FROM changes WHERE ts >= ? AND ts < ?;"
+        )
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, start)
+        sqlite3_bind_double(statement, 2, end)
+
+        var result: [(ts: Double, path: String, appBundleID: String?, kind: String, sizeDelta: Int64)] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.append((
+                ts: sqlite3_column_double(statement, 0),
+                path: String(cString: sqlite3_column_text(statement, 1)),
+                appBundleID: sqlite3_column_text(statement, 2).map { String(cString: $0) },
+                kind: String(cString: sqlite3_column_text(statement, 3)),
+                sizeDelta: sqlite3_column_int64(statement, 4)
+            ))
+        }
+        return result
+    }
+
+    /// 时间窗口内新 manifest 数（周报「新装 App 数」）。
+    func manifestCount(start: Double, end: Double) throws -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw DatabaseError.open("数据库已关闭") }
+
+        let statement = try prepareUnlocked(
+            "SELECT COUNT(*) FROM manifests WHERE created_at >= ? AND created_at < ?;"
+        )
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, start)
+        sqlite3_bind_double(statement, 2, end)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
     func insertReport(createdAt: Double, kind: String, contentJSON: String) throws {
         lock.lock()
         defer { lock.unlock() }

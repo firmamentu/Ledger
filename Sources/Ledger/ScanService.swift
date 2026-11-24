@@ -8,6 +8,7 @@ final class ScanService {
     private let database: Database
     private let index: IndexStore
     private let model: AppModel
+    private let changeTracker: ChangeTracker
     private let queue = DispatchQueue(label: "com.ledger.app.scan", qos: .utility)
     private var flushTimer: DispatchSourceTimer?
     private var lastFullScanAt = Date.distantPast
@@ -20,6 +21,7 @@ final class ScanService {
         self.database = database
         self.index = index
         self.model = model
+        self.changeTracker = ChangeTracker(database: database)
     }
 
     /// 启动 60s 定时落盘（§15.1）。
@@ -52,9 +54,13 @@ final class ScanService {
         queue.async { [weak self] in
             guard let self else { return }
             var notedApps = Set<String>()  // 批内去重：大安装上万事件只转发每个顶级 .app 一次
+            var changeRecords: [ChangeRecord] = []  // M6：索引前后 diff → changes
+            let ts = Date().timeIntervalSince1970
+
             for path in paths {
                 // Applications 下的事件：A 已消失 → 卸载判定（M4）；否则安装检测（M3）。
-                // 均不入索引（Applications 不是扫描根）
+                // 均不入索引（Applications 不是扫描根）——包括 /Applications 本身与
+                // 非 .app 子目录（如 /Applications/Utilities），否则会被当作普通目录重扫进索引
                 if let appPath = InstallService.topLevelAppPath(for: path) {
                     guard notedApps.insert(appPath).inserted else { continue }
                     var st = stat()
@@ -65,22 +71,64 @@ final class ScanService {
                     }
                     continue
                 }
+                if Self.isUnderApplications(path) {
+                    continue
+                }
+
+                let old = self.index.entry(for: path)
                 var st = stat()
                 guard lstat(path, &st) == 0 else {
                     self.index.remove(path: path)
+                    if let old {
+                        changeRecords.append(ChangeRecord(
+                            ts: ts, path: path, appBundleID: nil,
+                            kind: "removed", sizeDelta: -old.size, evidence: "unknown", inode: old.inode
+                        ))
+                    }
                     continue
                 }
                 switch st.st_mode & S_IFMT {
                 case S_IFLNK:
                     self.index.remove(path: path)  // §9：跳过符号链接
+                    if let old {
+                        changeRecords.append(ChangeRecord(
+                            ts: ts, path: path, appBundleID: nil,
+                            kind: "removed", sizeDelta: -old.size, evidence: "unknown", inode: old.inode
+                        ))
+                    }
                 case S_IFDIR:
+                    // shortcut: 目录级事件走子树重扫，不逐条记 changes（文件级事件为主）
                     self.performRescan(path)
                 default:
-                    self.index.upsert(path: path, entry: IndexEntry(
+                    let new = IndexEntry(
                         size: st.st_size,
                         mtime: Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1e9,
                         inode: Int64(st.st_ino)
-                    ))
+                    )
+                    self.index.upsert(path: path, entry: new)
+                    if let old {
+                        if old.size != new.size {  // 只记 size 变化（mtime 触碰不记，降噪）
+                            changeRecords.append(ChangeRecord(
+                                ts: ts, path: path, appBundleID: nil,
+                                kind: "modified", sizeDelta: new.size - old.size,
+                                evidence: "unknown", inode: new.inode
+                            ))
+                        }
+                    } else {
+                        changeRecords.append(ChangeRecord(
+                            ts: ts, path: path, appBundleID: nil,
+                            kind: "created", sizeDelta: new.size, evidence: "unknown", inode: new.inode
+                        ))
+                    }
+                }
+            }
+
+            if !changeRecords.isEmpty {
+                let summaries = ((try? self.database.appSummaries()) ?? []).map { ($0.bundleID, $0.name) }
+                do {
+                    try self.changeTracker.record(ChangeTracker.matchMoves(changeRecords), summaries: summaries)
+                } catch {
+                    self.logger.error("changes 落库失败：\(error.localizedDescription, privacy: .public)")
                 }
             }
         }
@@ -250,6 +298,16 @@ final class ScanService {
 
         let paths = out.split(separator: 0).compactMap { String(data: Data($0), encoding: .utf8) }
         return (paths, timedOut)
+    }
+
+    /// Applications 目录整体（含非 .app 子目录）都不是扫描根。
+    private static func isUnderApplications(_ path: String) -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let dirs = ["/Applications", home + "/Applications"]
+        for dir in dirs where path == dir || path.hasPrefix(dir + "/") {
+            return true
+        }
+        return false
     }
 
     private func flushNow() {

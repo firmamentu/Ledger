@@ -1,4 +1,5 @@
 import SwiftUI
+import Charts
 
 struct RootView: View {
     @ObservedObject var model: AppModel
@@ -12,14 +13,8 @@ struct RootView: View {
             PendingView(model: model)
                 .tabItem { Label("待处理", systemImage: "tray") }
 
-            PlaceholderTab(
-                title: "周报",
-                subtitle: "本周新增了多少足迹，分别来自哪里。",
-                systemImage: "chart.bar.xaxis",
-                emptyTitle: "还没有追踪数据",
-                emptyMessage: "账本开始记录变化后，这里会按周汇总。"
-            )
-            .tabItem { Label("周报", systemImage: "chart.bar.xaxis") }
+            WeeklyView(model: model, database: database)
+                .tabItem { Label("周报", systemImage: "chart.bar.xaxis") }
 
             SettingsView(model: model)
                 .tabItem { Label("设置", systemImage: "gearshape") }
@@ -49,8 +44,8 @@ private struct OverviewView: View {
 
                 HStack(spacing: 12) {
                     MetricCard(title: "已记录 App", value: "\(model.apps.count)", systemImage: "square.stack.3d.up")
-                    MetricCard(title: "未知项", value: "0", systemImage: "questionmark.circle")
-                    MetricCard(title: "今日新增", value: "0 B", systemImage: "arrow.down.circle")
+                    MetricCard(title: "未知项", value: "\(model.unknownCount)", systemImage: "questionmark.circle")
+                    MetricCard(title: "今日新增", value: ByteCountFormatter.string(fromByteCount: model.todayNewBytes, countStyle: .file), systemImage: "arrow.down.circle")
                 }
 
                 BaselineCard(model: model)
@@ -65,7 +60,9 @@ private struct OverviewView: View {
                             message: "新安装的 App 稳定后，会在这里留下完整足迹。"
                         )
                     } else {
-                        AppFootprintList(apps: model.apps)
+                        AppFootprintList(apps: model.apps) { app in
+                            model.openResiduals(app)
+                        }
                     }
                 }
             }
@@ -173,9 +170,150 @@ private struct PendingView: View {
     }
 }
 
+/// 周报页（M6）：主图堆叠柱状图（X=周一至周日，Y=新增字节，堆叠=App）+
+/// 副图按 category 堆叠 + 抬头汇总 + 导出 Markdown（§14）。
+private struct WeeklyView: View {
+    @ObservedObject var model: AppModel
+    let database: Database
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 26) {
+                PageHeader(
+                    title: "周报",
+                    subtitle: "本周新增了多少足迹，分别来自哪里。"
+                )
+
+                if let report = model.weekly {
+                    header(report)
+                    chartSection(report)
+                    categorySection(report)
+                    topApps(report)
+                } else {
+                    EmptyState(
+                        systemImage: "chart.bar.xaxis",
+                        title: "正在加载周报…",
+                        message: "账本记录的变化会按周汇总。"
+                    )
+                }
+            }
+            .padding(28)
+        }
+        .onAppear {
+            model.loadWeekly(database: database)
+        }
+    }
+
+    private func header(_ report: WeeklyReport) -> some View {
+        HStack(spacing: 12) {
+            MetricCard(
+                title: "本周新增",
+                value: ByteCountFormatter.string(fromByteCount: report.totalNewBytes, countStyle: .file),
+                systemImage: "arrow.down.circle"
+            )
+            MetricCard(title: "新装 App", value: "\(report.newInstallCount)", systemImage: "square.stack.3d.up")
+            MetricCard(title: "未知项", value: "\(report.unknownCount)", systemImage: "questionmark.circle")
+            MetricCard(
+                title: "移除（副指标）",
+                value: ByteCountFormatter.string(fromByteCount: report.removedBytes, countStyle: .file),
+                systemImage: "arrow.up.circle"
+            )
+        }
+    }
+
+    private func chartSection(_ report: WeeklyReport) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("每日新增（按 App 堆叠）")
+                .font(.headline)
+            Chart {
+                ForEach(0..<7, id: \.self) { day in
+                    ForEach(appRows(report, day: day), id: \.app) { row in
+                        BarMark(
+                            x: .value("日", WeeklyAggregator.dayNames[day]),
+                            y: .value("字节", row.bytes)
+                        )
+                        .foregroundStyle(by: .value("App", row.app))
+                    }
+                }
+            }
+            .chartYAxisLabel("新增字节")
+            .frame(height: 220)
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.5))
+        }
+    }
+
+    private func categorySection(_ report: WeeklyReport) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("每日新增（按类别堆叠）")
+                .font(.headline)
+            Chart {
+                ForEach(0..<7, id: \.self) { day in
+                    ForEach(report.dayCategoryBytes[day]?.sorted(by: { $0.key < $1.key }) ?? [], id: \.key) { category, bytes in
+                        BarMark(
+                            x: .value("日", WeeklyAggregator.dayNames[day]),
+                            y: .value("字节", bytes)
+                        )
+                        .foregroundStyle(by: .value("类别", category))
+                    }
+                }
+            }
+            .frame(height: 180)
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.5))
+        }
+    }
+
+    private func topApps(_ report: WeeklyReport) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Top5")
+                    .font(.headline)
+                Spacer()
+                Button("导出 Markdown") {
+                    let dir = AppPaths.supportDirectory.appendingPathComponent("reports", isDirectory: true)
+                    model.weeklyExportPath = WeeklyExporter.export(
+                        report: report, names: model.weeklyAppNames, to: dir
+                    )?.path
+                }
+                if let path = model.weeklyExportPath {
+                    Text("已导出：\(path)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+            ForEach(report.topApps, id: \.bundleID) { app in
+                HStack {
+                    Text(model.weeklyAppNames[app.bundleID] ?? app.bundleID)
+                        .font(.callout)
+                    Spacer()
+                    Text(ByteCountFormatter.string(fromByteCount: app.bytes, countStyle: .file))
+                        .font(.callout.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 2)
+            }
+        }
+    }
+
+    private func appRows(_ report: WeeklyReport, day: Int) -> [(app: String, bytes: Int64)] {
+        (report.dayBytes[day] ?? [:]).sorted { $0.value > $1.value }.map { (app: $0.key, bytes: $0.value) }
+    }
+}
+
 /// 已记账 App 列表（M3）：图标、名称、足迹大小、状态徽标。
 private struct AppFootprintList: View {
     let apps: [Database.AppSummary]
+    let onOpen: (Database.AppSummary) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -211,6 +349,8 @@ private struct AppFootprintList: View {
                 }
                 .padding(.vertical, 8)
                 .padding(.horizontal, 4)
+                .contentShape(Rectangle())
+                .onTapGesture { onOpen(app) }
                 Divider()
             }
         }
