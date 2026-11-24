@@ -13,6 +13,20 @@ struct CleanupReport {
     var reportPath: String?
 }
 
+/// 报告类别标题兜底（知识库不可用时）。
+enum ReportPresentation {
+    static func categoryTitle(_ category: String) -> String {
+        switch category {
+        case "cache": return "应用缓存"
+        case "log": return "日志"
+        case "preference": return "偏好设置"
+        case "app_data": return "应用数据"
+        case "registration": return "注册项"
+        default: return "其他"
+        }
+    }
+}
+
 final class CleanupService {
     private let logger = Logger(subsystem: AppPaths.bundleID, category: "cleanup")
     private let database: Database
@@ -157,37 +171,109 @@ final class CleanupService {
         return formatter
     }()
 
-    /// §14 报告页：删了什么 / 留了什么 / 怎么恢复。
+    /// 报告展示分组（视图与 Markdown 共用）：按类别聚合已清理项。
+    struct TrashedGroup {
+        var title: String
+        var count: Int
+        var bytes: Int64
+        var paths: [(path: String, size: Int64)]
+    }
+
+    static func trashedGroups(_ report: CleanupReport, bundleID: String) -> [TrashedGroup] {
+        var byCategory: [String: TrashedGroup] = [:]
+        for item in report.trashed {
+            let category = Attribution.category(path: item.path, registrationKind: nil)
+            var group = byCategory[category] ?? TrashedGroup(
+                title: ReportPresentation.categoryTitle(category), count: 0, bytes: 0, paths: []
+            )
+            group.count += 1
+            group.bytes += item.size
+            group.paths.append(item)
+            byCategory[category] = group
+        }
+        // 组标题优先取知识库（用组内首个路径的代表性解释）
+        for (category, group) in byCategory {
+            var titled = group
+            if let first = group.paths.first {
+                titled.title = Knowledge.shared.explanation(
+                    for: first.path, registrationKind: nil, bundleID: bundleID
+                ).title
+            }
+            byCategory[category] = titled
+        }
+        return byCategory.values.sorted { $0.bytes > $1.bytes }
+    }
+
+    /// §14 报告页（人读化）：总结 → 按类别分组的已清理 → 留了什么（按原因）→ 怎么恢复。
     private static func markdown(for report: CleanupReport, dateStamp: String) -> String {
+        let totalBytes = report.trashed.reduce(0) { $0 + $1.size }
         var lines: [String] = []
-        lines.append("# Ledger 卸载报告 — \(report.appName)（\(report.bundleID)）")
+        lines.append("# Ledger 卸载报告 — \(report.appName)")
         lines.append("")
         lines.append("时间：\(dateStamp)")
         lines.append("")
-        lines.append("## 删了什么（已移入废纸篓，可还原）")
-        if report.trashed.isEmpty {
+        lines.append("## 总结")
+        lines.append("")
+        lines.append("- 已清理：\(report.trashed.count) 项，共 \(ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file))，全部在废纸篓中，可还原")
+        lines.append("- 跳过：\(report.skipped.count) 项（已变化或删除失败，见下）")
+        lines.append("- 保留：\(report.kept.count) 项（未勾选或系统项）")
+        lines.append("")
+        lines.append("## 已清理（按类别）")
+        lines.append("")
+        let groups = trashedGroups(report, bundleID: report.bundleID)
+        if groups.isEmpty {
             lines.append("（无）")
         } else {
-            for item in report.trashed {
-                lines.append("- `\(item.path)`（\(ByteCountFormatter.string(fromByteCount: item.size, countStyle: .file))）")
+            for group in groups {
+                lines.append("### \(group.title)（\(group.count) 项，\(ByteCountFormatter.string(fromByteCount: group.bytes, countStyle: .file))）")
+                for item in group.paths.prefix(30) {
+                    lines.append("- `\(item.path)`")
+                }
+                if group.paths.count > 30 {
+                    lines.append("- …还有 \(group.paths.count - 30) 项")
+                }
+                lines.append("")
             }
         }
-        lines.append("")
         lines.append("## 留了什么")
+        lines.append("")
+        var handledPaths: [String] = []
+        for reason in ["已变化", "删除失败", "系统项，不代执行", "未勾选"] {
+            var items: [(path: String, reason: String)] = []
+            for item in report.skipped where item.reason.contains(reason) {
+                items.append((item.path, item.reason))
+            }
+            for item in report.kept where item.reason == reason {
+                items.append((item.path, item.reason))
+            }
+            guard !items.isEmpty else { continue }
+            handledPaths += report.skipped.filter { $0.reason.contains(reason) }.map(\.path)
+            let labeled = reason == "已变化" ? "\(reason)（可能不是原来那个）" : reason
+            lines.append("### \(labeled)（\(items.count) 项）")
+            for item in items.prefix(20) {
+                lines.append("- `\(item.path)`")
+            }
+            if items.count > 20 {
+                lines.append("- …还有 \(items.count - 20) 项")
+            }
+            lines.append("")
+        }
+        let leftovers = report.skipped.filter { !handledPaths.contains($0.path) }
+        if !leftovers.isEmpty {
+            lines.append("### 其他（\(leftovers.count) 项）")
+            for item in leftovers.prefix(20) {
+                lines.append("- `\(item.path)`（\(item.reason)）")
+            }
+            lines.append("")
+        }
         if report.skipped.isEmpty && report.kept.isEmpty {
             lines.append("（无）")
-        } else {
-            for item in report.skipped {
-                lines.append("- `\(item.path)`（\(item.reason)）")
-            }
-            for item in report.kept {
-                lines.append("- `\(item.path)`（\(item.reason)）")
-            }
         }
         lines.append("")
         lines.append("## 怎么恢复")
+        lines.append("")
         lines.append("废纸篓中的项目：打开废纸篓 → 右键 → 放回原处。")
-        lines.append("系统项（注册项/管理员权限项）：本报告不代执行，见残留清单中的处理命令。")
+        lines.append("系统项（注册项/管理员权限项）本报告不代执行，处理命令见残留清单。")
         return lines.joined(separator: "\n")
     }
 }

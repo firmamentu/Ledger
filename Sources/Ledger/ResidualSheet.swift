@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 
 /// 残留清单 Sheet（§14 / §10.4 四组核对 / §10.5 勾选规则 / §13 注册项只提示）。
+/// 分区：确证归属（fact，与 App 直接相关）常显；推断归属（安装窗口内变化）默认折叠。
 struct ResidualSheet: View {
     @ObservedObject var model: AppModel
     let app: Database.AppSummary
@@ -11,10 +12,18 @@ struct ResidualSheet: View {
     @State private var checked = Set<String>()
     @State private var loading = true
     @State private var showConfirm = false
+    @State private var showInference = false
+
+    private var report: CleanupReport? {
+        guard let report = model.cleanupReport, report.bundleID == app.bundleID else { return nil }
+        return report
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            if let report = model.cleanupReport, report.bundleID == app.bundleID {
+            header
+            Divider()
+            if let report {
                 ReportView(report: report) {
                     model.residualSheetApp = nil
                 }
@@ -27,38 +36,100 @@ struct ResidualSheet: View {
                 bottomBar
             }
         }
-        .frame(width: 720, height: 560)
-        .overlay(alignment: .topTrailing) {
-            HStack(spacing: 8) {
-                Button("关闭") {
-                    model.residualSheetApp = nil
-                }
-                .controlSize(.small)
+        .frame(width: 740, height: 580)
+    }
 
+    private var header: some View {
+        HStack(spacing: 12) {
+            if let iconPath = app.iconPath, let image = NSImage(contentsOfFile: iconPath) {
+                Image(nsImage: image)
+                    .resizable()
+                    .frame(width: 28, height: 28)
+            } else {
+                Image(systemName: "app")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(app.name)
+                    .font(.headline)
+                Text("\(app.fileCount) 项 · \(app.registrationCount) 注册项")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if report == nil {
                 Button("保留（不再提示）") {
                     model.onKeep?(app.bundleID)
                     model.residualSheetApp = nil
                 }
                 .controlSize(.small)
             }
-            .padding(10)
+            Button("关闭") {
+                model.residualSheetApp = nil
+            }
+            .controlSize(.small)
+            .keyboardShortcut(.cancelAction)
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.bar)
     }
 
-    // MARK: - 清单
+    // MARK: - 清单（fact/inference 分区）
+
+    private var factItems: [ResidualItem] {
+        items.filter { $0.row.evidence == "fact" }
+    }
+
+    private var inferenceItems: [ResidualItem] {
+        items.filter { $0.row.evidence != "fact" }
+    }
 
     private var itemList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(items) { item in
+                sectionHeader("确证归属", subtitle: "与 \(app.name) 直接相关 · \(factItems.count) 项")
+                ForEach(factItems) { item in
                     ItemRow(item: item, isChecked: checked.contains(item.id)) { toggle in
                         if toggle { checked.insert(item.id) } else { checked.remove(item.id) }
                     }
                     Divider()
                 }
+
+                if !inferenceItems.isEmpty {
+                    DisclosureGroup(isExpanded: $showInference) {
+                        ForEach(inferenceItems) { item in
+                            ItemRow(item: item, isChecked: checked.contains(item.id)) { toggle in
+                                if toggle { checked.insert(item.id) } else { checked.remove(item.id) }
+                            }
+                            Divider()
+                        }
+                    } label: {
+                        sectionHeader(
+                            "推断归属",
+                            subtitle: "安装窗口内变化 · \(inferenceItems.count) 项 · 默认不勾选"
+                        )
+                        .padding(.top, 12)
+                    }
+                }
             }
             .padding(12)
         }
+    }
+
+    private func sectionHeader(_ title: String, subtitle: String) -> some View {
+        HStack {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+            Text(subtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 4)
     }
 
     private var bottomBar: some View {
@@ -271,68 +342,158 @@ private struct CommandRow: View {
     }
 }
 
-// MARK: - 报告（§14：删了什么 / 留了什么 / 怎么恢复）
+// MARK: - 报告（人读化：总结 → 按类别 → 留了什么 → 怎么恢复）
 
 private struct ReportView: View {
     let report: CleanupReport
     let onClose: () -> Void
 
+    private var totalBytes: Int64 {
+        report.trashed.reduce(0) { $0 + $1.size }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("清理报告")
-                    .font(.title3.weight(.semibold))
-                Spacer()
-                Button("完成") {
-                    onClose()
-                }
-            }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                summaryCard
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("删了什么（\(report.trashed.count) 项，已在废纸篓）")
-                    .font(.headline)
-                ForEach(report.trashed, id: \.path) { item in
-                    Text("\(item.path)（\(ByteCountFormatter.string(fromByteCount: item.size, countStyle: .file))）")
+                sectionTitle("已清理（按类别）", subtitle: "全部在废纸篓中，可还原")
+                let groups = CleanupService.trashedGroups(report, bundleID: report.bundleID)
+                if groups.isEmpty {
+                    Text("（无）").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ForEach(groups, id: \.title) { group in
+                        DisclosureGroup {
+                            ForEach(group.paths.prefix(10), id: \.path) { item in
+                                Text(item.path)
+                                    .font(.caption)
+                                    .textSelection(.enabled)
+                            }
+                            if group.paths.count > 10 {
+                                Text("…还有 \(group.paths.count - 10) 项")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        } label: {
+                            HStack {
+                                Text(group.title)
+                                    .font(.callout.weight(.medium))
+                                Text("\(group.count) 项 · \(ByteCountFormatter.string(fromByteCount: group.bytes, countStyle: .file))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                        }
+                    }
+                }
+
+                sectionTitle("留了什么", subtitle: "已变化或未勾选的项目未被删除")
+                keptSection
+
+                sectionTitle("怎么恢复", subtitle: nil)
+                Text("废纸篓中的项目：打开废纸篓 → 右键 → 放回原处。系统项本报告不代执行，处理命令见残留清单。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if let path = report.reportPath {
+                    Text("报告已导出：\(path)")
                         .font(.caption)
+                        .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                 }
-                if report.trashed.isEmpty { Text("（无）").font(.caption).foregroundStyle(.secondary) }
             }
+            .padding(18)
+        }
+    }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("留了什么（\(report.skipped.count + report.kept.count) 项）")
-                    .font(.headline)
-                ForEach(report.skipped, id: \.path) { item in
-                    Text("\(item.path)（\(item.reason)）")
-                        .font(.caption)
-                        .textSelection(.enabled)
-                }
-                ForEach(report.kept, id: \.path) { item in
-                    Text("\(item.path)（\(item.reason)）")
-                        .font(.caption)
-                        .textSelection(.enabled)
-                }
-                if report.skipped.isEmpty && report.kept.isEmpty { Text("（无）").font(.caption).foregroundStyle(.secondary) }
-            }
+    private var summaryCard: some View {
+        HStack(spacing: 14) {
+            summaryStat("已清理", "\(report.trashed.count) 项", color: .green)
+            summaryStat("释放空间", ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file), color: .blue)
+            summaryStat("跳过", "\(report.skipped.count) 项", color: .orange)
+            summaryStat("保留", "\(report.kept.count) 项", color: .gray)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.5))
+        }
+    }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("怎么恢复")
-                    .font(.headline)
-                Text("废纸篓中的项目：打开废纸篓 → 右键 → 放回原处。系统项未删除，仅给出处理命令。")
+    private func summaryStat(_ title: String, _ value: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(.callout.weight(.semibold))
+                .monospacedDigit()
+                .foregroundStyle(color)
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func sectionTitle(_ title: String, subtitle: String?) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.headline)
+            if let subtitle {
+                Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
 
-            if let path = report.reportPath {
-                Text("报告已导出：\(path)")
+    private var keptSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            let changed = report.skipped.filter { $0.reason.contains("已变化") }
+            let failed = report.skipped.filter { $0.reason.contains("删除失败") }
+            let system = report.kept.filter { $0.reason == "系统项，不代执行" }
+            let unchecked = report.kept.filter { $0.reason == "未勾选" }
+            let other = report.skipped.filter {
+                !$0.reason.contains("已变化") && !$0.reason.contains("删除失败")
+            }
+
+            if changed.isEmpty && failed.isEmpty && system.isEmpty && unchecked.isEmpty && other.isEmpty {
+                Text("（无）").font(.caption).foregroundStyle(.secondary)
+            } else {
+                if !changed.isEmpty {
+                    keptRow("已变化（可能不是原来那个）", changed.count, items: changed.map(\.path))
+                }
+                if !failed.isEmpty {
+                    keptRow("删除失败", failed.count, items: failed.map(\.path))
+                }
+                if !system.isEmpty {
+                    keptRow("系统项（不代执行）", system.count, items: system.map(\.path))
+                }
+                if !unchecked.isEmpty {
+                    keptRow("未勾选", unchecked.count, items: unchecked.map(\.path))
+                }
+                if !other.isEmpty {
+                    keptRow("其他", other.count, items: other.map(\.path))
+                }
+            }
+        }
+    }
+
+    private func keptRow(_ title: String, _ count: Int, items: [String]) -> some View {
+        DisclosureGroup {
+            ForEach(items.prefix(10), id: \.self) { path in
+                Text(path)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
-
-            Spacer()
+            if items.count > 10 {
+                Text("…还有 \(items.count - 10) 项")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } label: {
+            Text("\(title)（\(count) 项）")
+                .font(.callout)
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

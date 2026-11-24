@@ -42,7 +42,7 @@ private struct OverviewView: View {
                     subtitle: "安装时记账，卸载时对账。"
                 )
 
-                HStack(spacing: 12) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 12)], spacing: 12) {
                     MetricCard(title: "已记录 App", value: "\(model.apps.count)", systemImage: "square.stack.3d.up")
                     MetricCard(title: "未知项", value: "\(model.unknownCount)", systemImage: "questionmark.circle")
                     MetricCard(title: "今日新增", value: ByteCountFormatter.string(fromByteCount: model.todayNewBytes, countStyle: .file), systemImage: "arrow.down.circle")
@@ -205,7 +205,7 @@ private struct WeeklyView: View {
     }
 
     private func header(_ report: WeeklyReport) -> some View {
-        HStack(spacing: 12) {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 12)], spacing: 12) {
             MetricCard(
                 title: "本周新增",
                 value: ByteCountFormatter.string(fromByteCount: report.totalNewBytes, countStyle: .file),

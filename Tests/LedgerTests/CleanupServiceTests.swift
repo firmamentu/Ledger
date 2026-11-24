@@ -74,7 +74,8 @@ final class CleanupServiceTests: XCTestCase {
         XCTAssertEqual(reportFiles.count, 1)
         XCTAssertTrue(reportFiles[0].hasPrefix("uninstall-com.test.clean-"))
         let report = try String(contentsOf: reportsDir.appendingPathComponent(reportFiles[0]), encoding: .utf8)
-        XCTAssertTrue(report.contains("删了什么"))
+        XCTAssertTrue(report.contains("总结"))
+        XCTAssertTrue(report.contains("已清理（按类别）"))
         XCTAssertTrue(report.contains("已变化"))
         XCTAssertTrue(report.contains("怎么恢复"))
     }
